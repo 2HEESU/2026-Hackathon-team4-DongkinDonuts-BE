@@ -12,7 +12,6 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import os
 from pathlib import Path
 import environ
-from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -42,19 +41,16 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "corsheaders",
-    "django.contrib.sites",
+    "rest_framework",
 
     # apps
-
-    # django rest framework jwt
-    "rest_framework",               
-    "rest_framework_simplejwt",     
-    "rest_framework.authtoken",     
-    "dj_rest_auth",
-    "dj_rest_auth.registration",
-    "allauth",              
-    "allauth.account",        
-    "allauth.socialaccount",
+    "common",
+    "accounts",
+    "context",
+    "digital_state",
+    "plans",
+    "routines",
+    "sessions_app",
 ]
 
 MIDDLEWARE = [
@@ -66,7 +62,6 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "project.urls"
@@ -139,36 +134,12 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
-REST_AUTH = {
-    "USE_JWT": True,
-    "JWT_AUTH_HTTPONLY": True,
-    "JWT_AUTH_COOKIE": "access_token",
-    "JWT_AUTH_REFRESH_COOKIE": "refresh_token",
-
-    "JWT_AUTH_SECURE": False,
-    "JWT_AUTH_SAMESITE": "Lax",
-
-    # 배포 시 True로 교체
-    "JWT_AUTH_COOKIE_USE_CSRF": False,
-    "SESSION_LOGIN": False,
-}
-
+# 로그인 없음(익명 사용자, accounts.User.device_code로 구분). 인증 클래스 없이 전부 열어둠.
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": (
-        "dj_rest_auth.jwt_auth.JWTCookieAuthentication",
-    ),
+    "DEFAULT_AUTHENTICATION_CLASSES": (),
     "DEFAULT_PERMISSION_CLASSES": (
-        "rest_framework.permissions.IsAuthenticated",
-    )
+        "rest_framework.permissions.AllowAny",
+    ),
 }
 
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=2),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=14),
-    "ROTATE_REFRESH_TOKENS": False,
-}
-
-SITE_ID = 1
-
-ACCOUNT_EMAIL_VERIFICATION = "none"
-ACCOUNT_LOGIN_METHOD = "username"
+CORS_ALLOW_ALL_ORIGINS = DEBUG
