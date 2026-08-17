@@ -1,3 +1,4 @@
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from common.models import BaseModel
@@ -15,6 +16,7 @@ class RoutineInstanceStatus(models.TextChoices):
     IN_PROGRESS = "IN_PROGRESS", "진행중"
     COMPLETED = "COMPLETED", "완료"
     ABORTED = "ABORTED", "중도종료"
+    CANCELED = "CANCELED", "취소됨"  # 시작도 안 하고 취소(슬롯 취소 cascade). ABORTED(하다가 중단)와 구분
 
 
 # 사전 정의된 활동 카탈로그(운영 데이터)
@@ -28,7 +30,7 @@ class ActivityType(models.Model):
     stage_type = models.CharField(max_length=20, choices=StageType.choices)
     target_state = models.ForeignKey(
         "common.StateOption",
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True,
         blank=True,
         related_name="activity_types",
@@ -37,8 +39,12 @@ class ActivityType(models.Model):
     name = models.CharField(max_length=100)
     purpose = models.TextField(blank=True)
     required_landmarks = models.JSONField(default=list, blank=True)
-    min_difficulty = models.PositiveSmallIntegerField(default=1)
-    max_difficulty = models.PositiveSmallIntegerField(default=5)
+    min_difficulty = models.PositiveSmallIntegerField(
+        default=1, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    max_difficulty = models.PositiveSmallIntegerField(
+        default=5, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
     default_duration_sec = models.PositiveIntegerField()
     is_active = models.BooleanField(default=True)
 
@@ -61,7 +67,9 @@ class RoutineInstance(BaseModel):
     )
     sequence_no = models.PositiveSmallIntegerField(help_text="1=Wake, 2=Shift, 3=Reset")
     stage_type = models.CharField(max_length=20, choices=StageType.choices)
-    difficulty_level = models.PositiveSmallIntegerField()
+    difficulty_level = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
     planned_duration_sec = models.PositiveIntegerField()
     status = models.CharField(
         max_length=20, choices=RoutineInstanceStatus.choices, default=RoutineInstanceStatus.LOCKED

@@ -134,7 +134,7 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
-# 로그인 없음(익명 사용자, accounts.User.device_code로 구분). 인증 클래스 없이 전부 열어둠.
+# 로그인 없음(익명 사용자, X-User-UUID 헤더 값을 accounts.User.id로 그대로 사용해 구분). 인증 클래스 없이 전부 열어둠.
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (),
     "DEFAULT_PERMISSION_CLASSES": (

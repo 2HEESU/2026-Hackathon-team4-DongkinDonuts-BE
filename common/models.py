@@ -1,5 +1,6 @@
 import uuid
 
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -57,7 +58,9 @@ class StateOption(models.Model):
 
     code = models.CharField(max_length=50, primary_key=True)
     label = models.CharField(max_length=50)
-    default_difficulty = models.PositiveSmallIntegerField(default=1)
+    default_difficulty = models.PositiveSmallIntegerField(
+        default=1, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
     routine_direction = models.CharField(max_length=255, blank=True)
     is_active = models.BooleanField(default=True)
 

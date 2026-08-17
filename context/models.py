@@ -16,15 +16,22 @@ class DailyContext(BaseModel):
     """ERD: daily_contexts. 온보딩 '오늘의 상황 입력' 1회분."""
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="daily_contexts")
+    # service_date는 클라이언트가 보내지 않는다 — User.timezone 기준으로 서버가 "오늘"을 계산해서
+    # 채운다. /today/ 조회 및 아래 unique 제약과 항상 일치시키기 위함.
     service_date = models.DateField(db_index=True)
     expected_focus_minutes = models.PositiveIntegerField(null=True, blank=True)
     focus_time_option = models.CharField(max_length=20, choices=FocusTimeOption.choices)
-    skipped = models.BooleanField(default=False)
+    # 항목별로 건너뛸 수 있어서 전체용 skipped 하나로는 표현 불가.
+    # 집중시간 건너뛰기는 focus_time_option=SKIPPED로 이미 표현됨.
+    state_skipped = models.BooleanField(default=False, help_text="현재 상태 선택을 건너뛰었는지")
+    tags_skipped = models.BooleanField(default=False, help_text="활동 태그 선택을 건너뛰었는지")
     note = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-service_date", "-created_at"]
-        indexes = [models.Index(fields=["user", "service_date"])]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "service_date"], name="unique_user_service_date")
+        ]
 
     def __str__(self):
         return f"DailyContext({self.user_id}, {self.service_date})"
@@ -35,7 +42,9 @@ class DailyContextActivityTag(models.Model):
     """ERD: daily_context_activity_tags (M2M 조인 테이블)."""
 
     daily_context = models.ForeignKey(DailyContext, on_delete=models.CASCADE, related_name="activity_tag_links")
-    activity_tag = models.ForeignKey("common.ActivityTag", on_delete=models.CASCADE)
+    # PROTECT: 태그가 비활성화(is_active=False)될 수는 있어도, 사용자가 과거에 선택한 기록이
+    # 남아있는 한 하드 삭제는 막는다.
+    activity_tag = models.ForeignKey("common.ActivityTag", on_delete=models.PROTECT)
 
     class Meta:
         constraints = [
@@ -50,7 +59,7 @@ class DailyContextState(models.Model):
     """ERD: daily_context_states. priority로 복수 선택 시 우선순위를 매긴다."""
 
     daily_context = models.ForeignKey(DailyContext, on_delete=models.CASCADE, related_name="state_links")
-    state = models.ForeignKey("common.StateOption", on_delete=models.CASCADE)
+    state = models.ForeignKey("common.StateOption", on_delete=models.PROTECT)
     priority = models.PositiveSmallIntegerField(default=1)
 
     class Meta:

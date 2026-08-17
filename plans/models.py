@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 
 from common.models import BaseModel
 
@@ -47,8 +48,9 @@ class AIPlanRun(BaseModel):
     마이그레이션 자체는 문제없이 도는데, "의존성 한 방향" 원칙은 이 필드 때문에 깨진다.
 
     pc_usage_patterns: 기존엔 digital_state.DigitalDataEntry FK 하나였는데, Digital State가
-    "요일×시간대 패턴"(여러 행)으로 바뀌면서 M2M으로 교체함. 이 값이 비어있으면(패턴 미입력)
-    오늘의 상황 기반으로 다음 휴식 1개만 추천하고, 있으면 하루치 슬롯을 한 번에 생성하는 식으로
+    "요일×시간대 패턴"(여러 행)으로 바뀌면서 M2M으로 교체함. "오늘 요일"에 해당하는 패턴이
+    있으면 그 날의 시간대별 데이터를 반영해 하루치 슬롯을 한 번에 생성하고, 없으면 오늘의 상황
+    기반으로 다음 휴식 1개만 추천한다(다른 요일 패턴이 있어도 오늘 요일이 없으면 단건 모드).
     서비스 레이어에서 분기할 예정 — 그 분기 로직 자체는 아직 구현 안 함.
     """
 
@@ -101,6 +103,13 @@ class RecoveryPlan(BaseModel):
 
     class Meta:
         ordering = ["-plan_date", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "plan_date"],
+                condition=Q(status="ACTIVE"),
+                name="unique_active_plan_per_user_date",
+            )
+        ]
 
     def __str__(self):
         return f"RecoveryPlan({self.user_id}, {self.plan_date})"

@@ -1,6 +1,5 @@
 from django.db import models
 
-from common.constants import CameraPermissionStatus
 from common.models import BaseModel
 
 
@@ -8,17 +7,18 @@ from common.models import BaseModel
 class User(BaseModel):
     """
     ERD: users
-    로그인 없는 익명 사용자. device_code는 프론트가 생성해서(로컬스토리지 등) 매 요청마다
-    헤더로 보내는 값이라고 가정한다 — 어떻게 만들고 보낼지는 프론트와 별도 확정 필요.
+    로그인 없는 익명 사용자. BaseModel이 이미 UUID PK(id)를 제공하므로 별도 device_code
+    필드를 두지 않는다 — 프론트가 생성한 UUID를 X-User-UUID 헤더로 보내면 그 값을 그대로
+    User.id로 사용한다(get_or_create(id=header_value)). PK를 클라이언트가 직접 지정하는
+    구조라, view에서 헤더 값이 유효한 UUID 형식인지 먼저 검증하고 아니면 400으로 거부해야 한다.
     """
 
-    device_code = models.CharField(max_length=128, unique=True, db_index=True)
     nickname = models.CharField(max_length=50, blank=True)
     timezone = models.CharField(max_length=64, default="Asia/Seoul")
     is_anonymous = models.BooleanField(default=True)
 
     def __str__(self):
-        return self.nickname or self.device_code[:12]
+        return self.nickname or str(self.id)[:12]
 
 
 # 사용자별 알림/카메라 권한 설정
@@ -27,9 +27,8 @@ class UserSettings(BaseModel):
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="settings")
     notification_enabled = models.BooleanField(default=True)
-    camera_permission_status = models.CharField(
-        max_length=20, choices=CameraPermissionStatus.choices, default=CameraPermissionStatus.UNKNOWN
-    )
+    # camera_permission_status는 여기 두지 않는다 — 실제 브라우저 권한과 무관해서 DB에 저장할
+    # 의미가 없음. 세션 시작 시점 스냅샷은 sessions_app.Session.camera_permission_status에 기록.
 
     def __str__(self):
         return f"UserSettings({self.user_id})"

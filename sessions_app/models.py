@@ -86,11 +86,19 @@ class SessionEvent(BaseModel):
         ordering = ["session", "created_at"]
 
 
-# 세션 종료 후 사용자 피드백(세션 1건당 1건)
+# 회복 슬롯(방문) 단위 사용자 피드백 — Wake/Shift/Reset 3개 세션이 아니라 슬롯당 1건
 class SessionFeedback(BaseModel):
-    """ERD: session_feedback. 세션 하나당 1건(OneToOne)이 자연스러워서 그렇게 제약함."""
+    """
+    ERD: session_feedback. 원래 Session에 OneToOne으로 걸려 있었는데, 세션이 RoutineInstance당
+    하나씩(방문당 3개) 생기는 구조라 피드백도 3번 물어보게 되는 문제가 있었음. IA 08번을 보면
+    피드백은 Wake→Shift→Reset 전체 완료 후 한 번만 묻는 흐름이라, RecoverySlot(방문 단위)에
+    걸리도록 수정함. 모델 이름은 과거 이름을 그대로 유지(sessions_app에 남겨둠 — 앱을 옮기는 건
+    실익 대비 마이그레이션 비용이 커서 보류).
+    """
 
-    session = models.OneToOneField(Session, on_delete=models.CASCADE, related_name="feedback")
+    recovery_slot = models.OneToOneField(
+        "plans.RecoverySlot", on_delete=models.CASCADE, related_name="feedback"
+    )
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="session_feedbacks")
     recovery_feeling = models.CharField(max_length=20, choices=RecoveryFeeling.choices, null=True, blank=True)
     difficulty_feedback = models.CharField(
