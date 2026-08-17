@@ -8,9 +8,10 @@ class User(BaseModel):
     """
     ERD: users
     로그인 없는 익명 사용자. BaseModel이 이미 UUID PK(id)를 제공하므로 별도 device_code
-    필드를 두지 않는다 — 프론트가 생성한 UUID를 X-User-UUID 헤더로 보내면 그 값을 그대로
-    User.id로 사용한다(get_or_create(id=header_value)). PK를 클라이언트가 직접 지정하는
-    구조라, view에서 헤더 값이 유효한 UUID 형식인지 먼저 검증하고 아니면 400으로 거부해야 한다.
+    필드를 두지 않는다 — 프론트가 생성한 UUID를 X-Device-Code 헤더로 보내면(프론트와 이미
+    합의된 헤더 이름) 그 값을 그대로 User.id로 사용한다(get_or_create(id=header_value)).
+    PK를 클라이언트가 직접 지정하는 구조라, view에서 헤더 값이 유효한 UUID 형식인지 먼저
+    검증하고 아니면 400으로 거부해야 한다.
     """
 
     nickname = models.CharField(max_length=50, blank=True)

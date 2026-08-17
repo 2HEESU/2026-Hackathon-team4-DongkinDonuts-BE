@@ -26,7 +26,7 @@ class InsightType(models.TextChoices):
     TODAY_ANALYSIS = "TODAY_ANALYSIS", "오늘의 분석"
     RECOMMENDATION_REASON = "RECOMMENDATION_REASON", "추천 이유"
     ROUTINE_REASON = "ROUTINE_REASON", "루틴 이유"
-    # ERD 이미지에서 네 번째 값이 잘려서 안 보였음(DATA_INSIGHT로 추정). 확인 후 추가할 것.
+    DATA_INSIGHT = "DATA_INSIGHT", "데이터 인사이트"  # IA 09-3 "Data Insight" 섹션과 매칭해서 확정
 
 
 class PlanStatus(models.TextChoices):
@@ -62,7 +62,7 @@ class AIPlanRun(BaseModel):
         "digital_state.PcUsagePattern",
         blank=True,
         related_name="ai_plan_runs",
-        help_text="비어있으면 오늘의 상황 기반 단건 추천, 있으면 패턴 기반 하루치 일괄 추천",
+        help_text="오늘 요일에 해당하는 패턴이 없으면 오늘의 상황 기반 단건 추천, 있으면 패턴 기반 하루치 일괄 추천",
     )
     reference_sessions = models.ManyToManyField(
         "sessions_app.Session",
@@ -81,14 +81,13 @@ class AIPlanRun(BaseModel):
 # 하루치 휴식 일정의 상위 컨테이너(사용자·날짜당 1건)
 class RecoveryPlan(BaseModel):
     """
-    ERD: recovery_plans. 이제 전체 컬럼 확인됨.
+    ERD: recovery_plans.
 
-    overall_reason / data_source_summary는 ai_insights와 겹치는 부분이 있어서 확인 필요.
-    - overall_reason: Home 화면에 바로 보여줄 요약 추천 이유로 보임 (ai_insights.body는
-      09번 AI Insight 화면들의 상세 설명 — 화면이 다르면 중복 아니라 의도된 분리일 수 있음)
-    - data_source_summary: IA 3번 섹션 예시 문구("오늘의 상황만 입력 → ...", "디지털 사용 패턴을
-      바탕으로 → ...")를 담는 사람이 읽는 문장으로 추정. ai_insights.data_sources_json은
-      같은 정보를 구조화된 리스트로 담음 — 형식만 다르고 내용은 같을 수 있어서 확인 필요.
+    overall_reason / data_source_summary는 ai_insights와 겹쳐서 제거함(ai_reason을
+    ai_insights로 합쳤을 때와 같은 논리). 플랜 전체 단위 설명이 필요하면 AIInsight를
+    recovery_plan만 걸고(recovery_slot/routine_instance는 null) 만들면 된다 —
+    overall_reason은 insight_type=RECOMMENDATION_REASON 정도로, data_source_summary는
+    data_sources_json으로 표현.
     """
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="recovery_plans")
@@ -98,8 +97,6 @@ class RecoveryPlan(BaseModel):
     ai_plan_run = models.ForeignKey(AIPlanRun, on_delete=models.SET_NULL, null=True, related_name="recovery_plans")
     plan_date = models.DateField(db_index=True)
     status = models.CharField(max_length=20, choices=PlanStatus.choices, default=PlanStatus.ACTIVE)
-    overall_reason = models.TextField(blank=True)
-    data_source_summary = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-plan_date", "-created_at"]
