@@ -3,7 +3,7 @@ import uuid
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
-from .models import User
+from .models import User, UserSettings
 
 DEVICE_CODE_HEADER = "HTTP_X_DEVICE_CODE"  # "X-Device-Code" 헤더의 request.META 키
 
@@ -32,6 +32,10 @@ class DeviceCodeAuthentication(BaseAuthentication):
             raise AuthenticationFailed("X-Device-Code 헤더 값이 올바른 UUID 형식이 아닙니다.")
 
         user, _ = User.objects.get_or_create(id=device_id)
+        # User가 새로 생겼든 예전부터 있었든, UserSettings가 항상 존재하도록 보장한다.
+        # (get_or_create라서 이미 있으면 그냥 넘어가고, 없을 때만 만듦 — 기존 User인데
+        # Settings만 누락된 경우까지 복구됨)
+        UserSettings.objects.get_or_create(user=user)
         return (user, None)
 
     def authenticate_header(self, request):

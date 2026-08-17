@@ -15,8 +15,10 @@ class RoutineInstanceStatus(models.TextChoices):
     AVAILABLE = "AVAILABLE", "진행 가능"
     IN_PROGRESS = "IN_PROGRESS", "진행중"
     COMPLETED = "COMPLETED", "완료"
-    ABORTED = "ABORTED", "중도종료"
-    CANCELED = "CANCELED", "취소됨"  # 시작도 안 하고 취소(슬롯 취소 cascade). ABORTED(하다가 중단)와 구분
+    CANCELED = "CANCELED", "취소됨"  # 슬롯 자체가 취소될 때 cascade로 처리
+    # ABORTED는 삭제함 — 세션 중단 정책이 "Session만 ABORTED로 기록하고 RoutineInstance는
+    # AVAILABLE로 되돌려서 재시도 가능하게" 하는 걸로 확정됨. RoutineInstance 자체가
+    # 중단 상태를 가질 필요가 없음(CANCELED는 성격이 다름 — 슬롯 취소로 인한 것).
 
 
 # 사전 정의된 활동 카탈로그(운영 데이터)
@@ -57,6 +59,11 @@ class RoutineInstance(BaseModel):
     """
     ERD: routine_instances. recovery_slot 하나당 Wake/Shift/Reset 3개 row가 생긴다.
     ai_reason 컬럼은 제거됨 — plans.AIInsight(routine_instance_id로 연결)로 일원화.
+
+    stage_type 컬럼은 여기 따로 두지 않는다 — ActivityType에 이미 stage_type이 있어서,
+    RoutineInstance에도 별도로 두면 activity.stage_type과 값이 어긋날 수 있음(예:
+    RoutineInstance.stage_type=BRAIN_WAKE인데 activity.stage_type=BRAIN_SHIFT인 경우).
+    필요하면 routine_instance.activity.stage_type으로 확인한다.
     """
 
     recovery_slot = models.ForeignKey(
@@ -66,7 +73,6 @@ class RoutineInstance(BaseModel):
         ActivityType, on_delete=models.PROTECT, related_name="routine_instances"
     )
     sequence_no = models.PositiveSmallIntegerField(help_text="1=Wake, 2=Shift, 3=Reset")
-    stage_type = models.CharField(max_length=20, choices=StageType.choices)
     difficulty_level = models.PositiveSmallIntegerField(
         validators=[MinValueValidator(1), MaxValueValidator(5)]
     )
@@ -86,4 +92,4 @@ class RoutineInstance(BaseModel):
         ]
 
     def __str__(self):
-        return f"RoutineInstance(slot={self.recovery_slot_id}, #{self.sequence_no}, {self.stage_type})"
+        return f"RoutineInstance(slot={self.recovery_slot_id}, #{self.sequence_no}, {self.activity.stage_type})"

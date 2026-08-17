@@ -11,7 +11,8 @@ class SlotStatus(models.TextChoices):
     CANCELED = "CANCELED", "취소됨"
     STARTED = "STARTED", "시작됨"
     COMPLETED = "COMPLETED", "완료"
-    MISSED = "MISSED", "놓침"
+    # MISSED(놓침)는 삭제함 — 추천 시간이 지나도 사용자가 언제든 세션을 시작할 수 있는
+    # 정책이라 "놓쳐서 시작 불가"를 나타내는 상태 자체가 필요 없음.
 
 
 class NotificationStatus(models.TextChoices):
@@ -41,34 +42,23 @@ class AIPlanRun(BaseModel):
     """
     ERD: ai_plan_runs. LLM 호출 원본 로그(입력/출력 스냅샷).
 
-    reference_sessions: IA 18번 "AI 추천 로직" 입력 5개 중 daily_context_id/pc_usage_patterns
-    두 개만 컬럼으로 있고 "이전 수행 데이터"를 가리킬 컬럼이 없어서 추가함.
-    sessions_app.Session을 참조하는데, sessions_app이 이미 plans(recovery_slot_id)를
-    참조하고 있어서 plans ↔ sessions_app이 서로를 아는 구조가 된다. 문자열 참조라
-    마이그레이션 자체는 문제없이 도는데, "의존성 한 방향" 원칙은 이 필드 때문에 깨진다.
-
-    pc_usage_patterns: 기존엔 digital_state.DigitalDataEntry FK 하나였는데, Digital State가
-    "요일×시간대 패턴"(여러 행)으로 바뀌면서 M2M으로 교체함. "오늘 요일"에 해당하는 패턴이
-    있으면 그 날의 시간대별 데이터를 반영해 하루치 슬롯을 한 번에 생성하고, 없으면 오늘의 상황
-    기반으로 다음 휴식 1개만 추천한다(다른 요일 패턴이 있어도 오늘 요일이 없으면 단건 모드).
-    서비스 레이어에서 분기할 예정 — 그 분기 로직 자체는 아직 구현 안 함.
+    reference_sessions(Session M2M), pc_usage_patterns(PcUsagePattern M2M)는 둘 다 제거함.
+    이유 1(의존성 방향): reference_sessions는 sessions_app.Session을 참조하는데,
+    sessions_app이 이미 plans(recovery_slot_id)를 참조하고 있어서 plans ↔ sessions_app이
+    서로를 아는 구조가 됨(문자열 참조라 마이그레이션 자체는 도는데 "의존성 한 방향" 원칙은
+    깨짐).
+    이유 2(데이터 유실): pc_usage_patterns는 PUT /digital-state/patterns/bulk/가
+    delete-then-create 방식이라, 사용자가 패턴을 수정하는 순간 on_delete=CASCADE로 과거
+    AIPlanRun과의 M2M 연결이 조용히 끊어짐. AIPlanRun의 목적 자체가 "그 당시 뭘 보고
+    추천했는지" 기록하는 것이라, 변경 가능한 DB row를 참조하는 대신 아래
+    input_snapshot_json에 당시 값을 그대로 스냅샷으로 저장한다.
+    예: {"previous_sessions": [...], "previous_feedback": [...],
+         "pc_usage_patterns": [{"day_of_week": "MON", ...}]}
     """
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="ai_plan_runs")
     daily_context = models.ForeignKey(
         "context.DailyContext", on_delete=models.CASCADE, related_name="ai_plan_runs"
-    )
-    pc_usage_patterns = models.ManyToManyField(
-        "digital_state.PcUsagePattern",
-        blank=True,
-        related_name="ai_plan_runs",
-        help_text="오늘 요일에 해당하는 패턴이 없으면 오늘의 상황 기반 단건 추천, 있으면 패턴 기반 하루치 일괄 추천",
-    )
-    reference_sessions = models.ManyToManyField(
-        "sessions_app.Session",
-        blank=True,
-        related_name="referenced_in_ai_plan_runs",
-        help_text="이 추천을 생성할 때 참고한 이전 수행 기록(세션)들. 세션 피드백까지 필요하면 별도 필드 추가 필요.",
     )
     model_name = models.CharField(max_length=100)
     input_snapshot_json = models.JSONField()

@@ -17,7 +17,7 @@ class DailyContext(BaseModel):
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="daily_contexts")
     # service_date는 클라이언트가 보내지 않는다 — User.timezone 기준으로 서버가 "오늘"을 계산해서
-    # 채운다. /today/ 조회 및 아래 unique 제약과 항상 일치시키기 위함.
+    # 채운다. "오늘 것 조회" 등에서 하루 단위로 묶어보기 위한 용도(더 이상 unique 기준은 아님).
     service_date = models.DateField(db_index=True)
     expected_focus_minutes = models.PositiveIntegerField(null=True, blank=True)
     focus_time_option = models.CharField(max_length=20, choices=FocusTimeOption.choices)
@@ -29,9 +29,9 @@ class DailyContext(BaseModel):
 
     class Meta:
         ordering = ["-service_date", "-created_at"]
-        constraints = [
-            models.UniqueConstraint(fields=["user", "service_date"], name="unique_user_service_date")
-        ]
+        # 하루 1건 unique 제약은 삭제함(0817 PM 개정) — 알림이 울릴 때마다(하루 여러 번)
+        # "지금 상태는 어때요?"를 다시 물어보는 흐름으로 바뀌어서, 하루에 여러 건이
+        # 정상적으로 생길 수 있음. "오늘 것 하나"가 아니라 "오늘의 체크인 여러 건" 개념.
 
     def __str__(self):
         return f"DailyContext({self.user_id}, {self.service_date})"
