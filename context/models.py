@@ -3,67 +3,93 @@ from django.db import models
 from common.models import BaseModel
 
 
-class FocusTimeOption(models.TextChoices):
-    THIRTY_MINUTES = "THIRTY_MINUTES", "30분"
-    ONE_HOUR = "ONE_HOUR", "1시간"
-    TWO_HOURS = "TWO_HOURS", "2시간"
-    CUSTOM = "CUSTOM", "직접 설정"
-    SKIPPED = "SKIPPED", "건너뛰기"
+class UserContextSnapshot(BaseModel):
+    """
+    사용자가 특정 시점에 입력한 '지금 내 상태' 스냅샷.
 
+    하루 전체를 대표하는 값이 아니라 서비스 진입, 알림 재진입 등 사용자가 상태를 다시
+    제출하는 순간마다 새로 쌓이는 불변 기록이다. 이후 활동 종류/시간은 생명주기가 달라서
+    NextActivityPlan으로 분리한다.
+    """
 
-# 온보딩에서 입력하는 '오늘의 상황' 1회분
-class DailyContext(BaseModel):
-    """ERD: daily_contexts. 온보딩 '오늘의 상황 입력' 1회분."""
-
-    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="daily_contexts")
-    # service_date는 클라이언트가 보내지 않는다 — User.timezone 기준으로 서버가 "오늘"을 계산해서
-    # 채운다. "오늘 것 조회" 등에서 하루 단위로 묶어보기 위한 용도(더 이상 unique 기준은 아님).
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="context_snapshots")
     service_date = models.DateField(db_index=True)
-    expected_focus_minutes = models.PositiveIntegerField(null=True, blank=True)
-    focus_time_option = models.CharField(max_length=20, choices=FocusTimeOption.choices)
-    # 항목별로 건너뛸 수 있어서 전체용 skipped 하나로는 표현 불가.
-    # 집중시간 건너뛰기는 focus_time_option=SKIPPED로 이미 표현됨.
-    state_skipped = models.BooleanField(default=False, help_text="현재 상태 선택을 건너뛰었는지")
-    tags_skipped = models.BooleanField(default=False, help_text="활동 태그 선택을 건너뛰었는지")
+    state_options = models.ManyToManyField(
+        "common.StateOption",
+        through="UserContextSnapshotState",
+        related_name="context_snapshots",
+        blank=True,
+    )
     note = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-service_date", "-created_at"]
-        # 하루 1건 unique 제약은 삭제함(0817 PM 개정) — 알림이 울릴 때마다(하루 여러 번)
-        # "지금 상태는 어때요?"를 다시 물어보는 흐름으로 바뀌어서, 하루에 여러 건이
-        # 정상적으로 생길 수 있음. "오늘 것 하나"가 아니라 "오늘의 체크인 여러 건" 개념.
 
     def __str__(self):
-        return f"DailyContext({self.user_id}, {self.service_date})"
+        return f"UserContextSnapshot({self.user_id}, {self.service_date})"
 
 
-# DailyContext ↔ ActivityTag M2M 조인 테이블
-class DailyContextActivityTag(models.Model):
-    """ERD: daily_context_activity_tags (M2M 조인 테이블)."""
+class UserContextSnapshotState(models.Model):
+    """UserContextSnapshot ↔ StateOption M2M 조인 테이블. priority로 복수 선택 순서를 보존한다."""
 
-    daily_context = models.ForeignKey(DailyContext, on_delete=models.CASCADE, related_name="activity_tag_links")
-    # PROTECT: 태그가 비활성화(is_active=False)될 수는 있어도, 사용자가 과거에 선택한 기록이
-    # 남아있는 한 하드 삭제는 막는다.
-    activity_tag = models.ForeignKey("common.ActivityTag", on_delete=models.PROTECT)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["daily_context", "activity_tag"], name="unique_daily_context_activity_tag"
-            )
-        ]
-
-
-# DailyContext ↔ StateOption M2M 조인 테이블(우선순위 포함)
-class DailyContextState(models.Model):
-    """ERD: daily_context_states. priority로 복수 선택 시 우선순위를 매긴다."""
-
-    daily_context = models.ForeignKey(DailyContext, on_delete=models.CASCADE, related_name="state_links")
+    context_snapshot = models.ForeignKey(
+        UserContextSnapshot, on_delete=models.CASCADE, related_name="state_links"
+    )
     state = models.ForeignKey("common.StateOption", on_delete=models.PROTECT)
     priority = models.PositiveSmallIntegerField(default=1)
 
     class Meta:
         ordering = ["priority"]
         constraints = [
-            models.UniqueConstraint(fields=["daily_context", "state"], name="unique_daily_context_state")
+            models.UniqueConstraint(
+                fields=["context_snapshot", "state"], name="unique_context_snapshot_state"
+            )
+        ]
+
+
+class NextActivityPlan(BaseModel):
+    """
+    사용자가 입력한 '앞으로의 활동 종류와 활동 시간' 기록.
+
+    내 계획 다시 설정은 상태 스냅샷을 새로 만들지 않고 이 모델만 새로 쌓는다. 시간을
+    건너뛴 경우에는 expected_activity_minutes를 null로 둔다.
+    """
+
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="next_activity_plans")
+    context_snapshot = models.ForeignKey(
+        UserContextSnapshot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="next_activity_plans",
+    )
+    service_date = models.DateField(db_index=True)
+    activity_tags = models.ManyToManyField(
+        "common.ActivityTag",
+        through="NextActivityPlanActivityTag",
+        related_name="next_activity_plans",
+        blank=True,
+    )
+    expected_activity_minutes = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-service_date", "-created_at"]
+
+    def __str__(self):
+        return f"NextActivityPlan({self.user_id}, {self.service_date}, {self.expected_activity_minutes})"
+
+
+class NextActivityPlanActivityTag(models.Model):
+    """NextActivityPlan ↔ ActivityTag M2M 조인 테이블."""
+
+    next_activity_plan = models.ForeignKey(
+        NextActivityPlan, on_delete=models.CASCADE, related_name="activity_tag_links"
+    )
+    activity_tag = models.ForeignKey("common.ActivityTag", on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["next_activity_plan", "activity_tag"], name="unique_next_activity_plan_tag"
+            )
         ]
