@@ -23,7 +23,6 @@ class DailyContextSerializer(serializers.ModelSerializer):
             "service_date",
             "expected_focus_minutes",
             "focus_time_option",
-            "state_skipped",
             "tags_skipped",
             "note",
             "activity_tags",
@@ -50,11 +49,13 @@ class DailyContextCreateSerializer(serializers.Serializer):
 
     focus_time_option = serializers.ChoiceField(choices=FocusTimeOption.choices)
     expected_focus_minutes = serializers.IntegerField(required=False, allow_null=True, default=None)
-    state_skipped = serializers.BooleanField(default=False)
     tags_skipped = serializers.BooleanField(default=False)
     note = serializers.CharField(required=False, allow_blank=True, default="")
     activity_tags = serializers.ListField(child=serializers.CharField(), required=False, default=list)
-    state_options = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    # 이슈 #13: state는 더 이상 건너뛸 수 없음 — required=True(기본값) + allow_empty=False라서
+    # POST에선 반드시 보내야 하고(partial 아니므로), PATCH에선 아예 안 보내면 건드리지 않지만
+    # 보낼 거면 최소 1개는 있어야 한다(빈 리스트로 지우는 것 금지).
+    state_options = serializers.ListField(child=serializers.CharField(), allow_empty=False)
 
     def validate(self, attrs):
         option = attrs.get("focus_time_option")

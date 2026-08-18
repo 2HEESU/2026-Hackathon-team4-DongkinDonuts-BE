@@ -1,3 +1,10 @@
-# 아직 View/Serializer 없음 — 모델 단계까지만 진행 중. 다음 단계에서 채울 예정.
+from django.urls import path
+
+from .views import PcUsagePatternBulkUpdateView, PcUsagePatternListView
+
 app_name = "digital_state"
-urlpatterns = []
+
+urlpatterns = [
+    path("patterns/bulk/", PcUsagePatternBulkUpdateView.as_view(), name="pattern-bulk-update"),
+    path("patterns/", PcUsagePatternListView.as_view(), name="pattern-list"),
+]
