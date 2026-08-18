@@ -1,3 +1,10 @@
-# 아직 View/Serializer 없음 — 모델 단계까지만 진행 중. 다음 단계에서 채울 예정.
+from django.urls import path
+
+from .views import ActivityTagListView, StateOptionListView
+
 app_name = "common"
-urlpatterns = []
+
+urlpatterns = [
+    path("activity-tags/", ActivityTagListView.as_view(), name="activity-tag-list"),
+    path("state-options/", StateOptionListView.as_view(), name="state-option-list"),
+]
