@@ -1,3 +1,13 @@
-# 아직 View/Serializer 없음 — 모델 단계까지만 진행 중. 다음 단계에서 채울 예정.
+from django.urls import path
+
+from .views import PcUsagePatternAnalysisView, PcUsagePatternListReplaceView
+
 app_name = "digital_state"
-urlpatterns = []
+urlpatterns = [
+    path("pc-usage-patterns/", PcUsagePatternListReplaceView.as_view(), name="pc-usage-pattern-list-replace"),
+    path(
+        "pc-usage-patterns/analysis/",
+        PcUsagePatternAnalysisView.as_view(),
+        name="pc-usage-pattern-analysis",
+    ),
+]
