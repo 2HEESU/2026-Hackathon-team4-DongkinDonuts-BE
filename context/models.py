@@ -21,9 +21,9 @@ class DailyContext(BaseModel):
     service_date = models.DateField(db_index=True)
     expected_focus_minutes = models.PositiveIntegerField(null=True, blank=True)
     focus_time_option = models.CharField(max_length=20, choices=FocusTimeOption.choices)
-    # 항목별로 건너뛸 수 있어서 전체용 skipped 하나로는 표현 불가.
     # 집중시간 건너뛰기는 focus_time_option=SKIPPED로 이미 표현됨.
-    state_skipped = models.BooleanField(default=False, help_text="현재 상태 선택을 건너뛰었는지")
+    # state_skipped는 제거함(이슈 #13) — state 정보 없이는 회복 루틴 추천이 성립하지 않아서
+    # state 선택을 필수로 바꿈. 활동 태그는 여전히 선택 사항이라 tags_skipped는 유지.
     tags_skipped = models.BooleanField(default=False, help_text="활동 태그 선택을 건너뛰었는지")
     note = models.TextField(blank=True)
 
