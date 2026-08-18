@@ -1,0 +1,88 @@
+[
+  {
+    "model": "common.stateoption",
+    "pk": "eye_tired",
+    "fields": {
+      "label": "눈이 피로해요",
+      "default_difficulty": 1,
+      "routine_direction": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.stateoption",
+    "pk": "neck_shoulder_stiff",
+    "fields": {
+      "label": "목과 어깨가 굳었어요",
+      "default_difficulty": 1,
+      "routine_direction": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.stateoption",
+    "pk": "cant_focus",
+    "fields": {
+      "label": "집중이 안 돼요",
+      "default_difficulty": 1,
+      "routine_direction": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.stateoption",
+    "pk": "drowsy_foggy",
+    "fields": {
+      "label": "머리가 멍하고 졸려요",
+      "default_difficulty": 1,
+      "routine_direction": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.stateoption",
+    "pk": "still_okay",
+    "fields": {
+      "label": "아직 괜찮아요",
+      "default_difficulty": 1,
+      "routine_direction": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.activitytag",
+    "pk": "coding",
+    "fields": {
+      "name": "코딩",
+      "category": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.activitytag",
+    "pk": "assignment",
+    "fields": {
+      "name": "과제",
+      "category": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.activitytag",
+    "pk": "chore",
+    "fields": {
+      "name": "작업",
+      "category": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "common.activitytag",
+    "pk": "work",
+    "fields": {
+      "name": "업무",
+      "category": "",
+      "is_active": true
+    }
+  }
+]

@@ -1,7 +1,24 @@
 from rest_framework import serializers
 
+from common.models import ActivityTag
+
 from .models import DailyContext, DailyContextActivityTag, DailyContextState, FocusTimeOption
 from .utils import today_for_user
+
+
+def _get_or_create_activity_tags(codes, user):
+    """
+    activity_tags로 들어온 문자열 목록을 ActivityTag로 매핑한다. 이미 있는 코드(기본
+    제공 태그, 또는 이 사용자가 예전에 만든 커스텀 태그)면 그대로 쓰고, 없으면 "+
+    직접입력"으로 새로 만든 것으로 보고 created_by=user로 새 ActivityTag를 만든다.
+    """
+    tags = []
+    for code in codes:
+        tag, _ = ActivityTag.objects.get_or_create(
+            code=code, defaults={"name": code, "created_by": user}
+        )
+        tags.append(tag)
+    return tags
 
 FIXED_MINUTES = {
     FocusTimeOption.THIRTY_MINUTES: 30,
@@ -82,9 +99,10 @@ class DailyContextCreateSerializer(serializers.Serializer):
         daily_context = DailyContext.objects.create(
             user=user, service_date=today_for_user(user), **validated_data
         )
+        activity_tags = _get_or_create_activity_tags(activity_tag_codes, user)
         DailyContextActivityTag.objects.bulk_create(
-            DailyContextActivityTag(daily_context=daily_context, activity_tag_id=code)
-            for code in activity_tag_codes
+            DailyContextActivityTag(daily_context=daily_context, activity_tag=tag)
+            for tag in activity_tags
         )
         DailyContextState.objects.bulk_create(
             DailyContextState(daily_context=daily_context, state_id=code, priority=i + 1)
@@ -103,9 +121,10 @@ class DailyContextCreateSerializer(serializers.Serializer):
 
         if activity_tag_codes is not None:
             instance.activity_tag_links.all().delete()
+            activity_tags = _get_or_create_activity_tags(activity_tag_codes, instance.user)
             DailyContextActivityTag.objects.bulk_create(
-                DailyContextActivityTag(daily_context=instance, activity_tag_id=code)
-                for code in activity_tag_codes
+                DailyContextActivityTag(daily_context=instance, activity_tag=tag)
+                for tag in activity_tags
             )
         if state_codes is not None:
             instance.state_links.all().delete()
