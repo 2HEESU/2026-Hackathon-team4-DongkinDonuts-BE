@@ -1,3 +1,11 @@
-# 아직 View/Serializer 없음 — 모델 단계까지만 진행 중. 다음 단계에서 채울 예정.
+from django.urls import path
+
+from .views import DailyContextCreateView, DailyContextTodayView, DailyContextUpdateView
+
 app_name = "context"
-urlpatterns = []
+
+urlpatterns = [
+    path("daily-contexts/today/", DailyContextTodayView.as_view(), name="daily-context-today"),
+    path("daily-contexts/", DailyContextCreateView.as_view(), name="daily-context-create"),
+    path("daily-contexts/<uuid:pk>/", DailyContextUpdateView.as_view(), name="daily-context-update"),
+]
