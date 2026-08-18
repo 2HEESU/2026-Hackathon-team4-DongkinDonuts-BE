@@ -179,6 +179,24 @@ class Notification(BaseModel):
     )
 
 
+class WebPushSubscription(BaseModel):
+    """브라우저 Web Push 발송 대상 구독 정보."""
+
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="web_push_subscriptions")
+    endpoint = models.TextField(unique=True)
+    p256dh = models.CharField(max_length=255)
+    auth = models.CharField(max_length=255)
+    user_agent = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"WebPushSubscription({self.user_id}, active={self.is_active})"
+
+
 # AI 추천/판단에 대한 설명 텍스트 모음
 class AIInsight(BaseModel):
     """
