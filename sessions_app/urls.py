@@ -6,6 +6,7 @@ from .views import (
     SessionCompleteView,
     SessionDetailView,
     SessionEventCreateView,
+    SessionFeedbackCreateView,
     SessionResetView,
     SessionStartView,
 )
@@ -22,6 +23,11 @@ urlpatterns = [
         "active/",
         ActiveSessionView.as_view(),
         name="session-active",
+    ),
+    path(
+        "feedback/",
+        SessionFeedbackCreateView.as_view(),
+        name="session-feedback",
     ),
     path(
         "<uuid:id>/reset/",

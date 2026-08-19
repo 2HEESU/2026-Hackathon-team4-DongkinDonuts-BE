@@ -3,7 +3,7 @@ from rest_framework import serializers
 from common.constants import CameraPermissionStatus
 from routines.serializers import ActivityTypeSerializer
 
-from .models import Session, SessionEvent
+from .models import Session, SessionEvent, DifficultyFeedback, RecoveryFeeling, SessionFeedback
 
 class SessionEventSerializer(serializers.ModelSerializer):
     class Meta:
@@ -76,3 +76,32 @@ class SessionEventCreateSerializer(serializers.Serializer):
         allow_blank=True,
         default="",
     )
+
+class SessionFeedbackSerializer(serializers.ModelSerializer):
+    recovery_slot_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = SessionFeedback
+        fields = [
+            "id",
+            "recovery_slot_id",
+            "recovery_feeling",
+            "difficulty_feedback",
+            "skipped",
+            "created_at",
+            "updated_at",
+        ]
+
+class SessionFeedbackCreateSerializer(serializers.Serializer):
+    recovery_slot_id = serializers.UUIDField()
+    recovery_feeling = serializers.ChoiceField(
+        choices=RecoveryFeeling.choices,
+        required=False,
+        allow_null=True
+    )
+    difficulty_feedback = serializers.ChoiceField(
+        choices=DifficultyFeedback.choices,
+        required=False,
+        allow_null=True,
+    )
+    skipped = serializers.BooleanField(default=False)

@@ -553,9 +553,10 @@ class SessionAbortCompleteApiTest(APITestCase):
             SessionStatus.IN_PROGRESS,
         )
 
+# sessions_app/tests.py 하단 2개 테스트 클래스를 아래 코드로 교체해주세요!
+
 class SessionEventCreateAPITest(APITestCase):
     def setUp(self):
-        # User.objects.create_user 대신 User.objects.create() 사용
         self.user = User.objects.create()
         self.other_user = User.objects.create()
 
@@ -563,21 +564,25 @@ class SessionEventCreateAPITest(APITestCase):
             HTTP_X_DEVICE_CODE=str(self.user.id),
         )
 
-        self.daily_context = DailyContext.objects.create(
+        self.context_snapshot = UserContextSnapshot.objects.create(
             user=self.user,
             service_date=date.today(),
-            focus_time_option=FocusTimeOption.SKIPPED,
-            tags_skipped=True,
+        )
+        self.next_activity_plan = NextActivityPlan.objects.create(
+            user=self.user,
+            context_snapshot=self.context_snapshot,
+            service_date=date.today(),
         )
 
         self.plan = RecoveryPlan.objects.create(
             user=self.user,
-            daily_context=self.daily_context,
             plan_date=date.today(),
         )
 
         self.slot = RecoverySlot.objects.create(
             recovery_plan=self.plan,
+            context_snapshot=self.context_snapshot,
+            next_activity_plan=self.next_activity_plan,
             sequence_no=1,
             recommended_at=timezone.now(),
             scheduled_at=timezone.now(),
@@ -659,3 +664,82 @@ class SessionEventCreateAPITest(APITestCase):
         response = self.client.post(url, payload, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+
+
+class SessionFeedbackCreateAPITest(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create()
+        self.other_user = User.objects.create()
+
+        self.client.credentials(
+            HTTP_X_DEVICE_CODE=str(self.user.id),
+        )
+
+        self.context_snapshot = UserContextSnapshot.objects.create(
+            user=self.user,
+            service_date=date.today(),
+        )
+        self.next_activity_plan = NextActivityPlan.objects.create(
+            user=self.user,
+            context_snapshot=self.context_snapshot,
+            service_date=date.today(),
+        )
+
+        self.plan = RecoveryPlan.objects.create(
+            user=self.user,
+            plan_date=date.today(),
+        )
+
+        self.slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            context_snapshot=self.context_snapshot,
+            next_activity_plan=self.next_activity_plan,
+            sequence_no=1,
+            recommended_at=timezone.now(),
+            scheduled_at=timezone.now(),
+            status=SlotStatus.COMPLETED,
+        )
+
+    def test_create_session_feedback_success(self):
+        url = "/api/v1/sessions/feedback/"
+        payload = {
+            "recovery_slot_id": str(self.slot.id),
+            "recovery_feeling": "MUCH_BETTER",
+            "difficulty_feedback": "JUST_RIGHT",
+            "skipped": False,
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["data"]["recovery_feeling"], "MUCH_BETTER")
+        self.assertEqual(response.data["data"]["difficulty_feedback"], "JUST_RIGHT")
+        self.assertFalse(response.data["data"]["skipped"])
+
+    def test_create_session_feedback_skipped(self):
+        url = "/api/v1/sessions/feedback/"
+        payload = {
+            "recovery_slot_id": str(self.slot.id),
+            "skipped": True,
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["data"]["skipped"])
+        self.assertIsNone(response.data["data"]["recovery_feeling"])
+
+    def test_create_session_feedback_other_user_slot_denied(self):
+        self.client.credentials(
+            HTTP_X_DEVICE_CODE=str(self.other_user.id),
+        )
+        url = "/api/v1/sessions/feedback/"
+        payload = {
+            "recovery_slot_id": str(self.slot.id),
+            "skipped": True,
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
