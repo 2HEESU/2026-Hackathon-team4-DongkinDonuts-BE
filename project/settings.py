@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import os
 from pathlib import Path
 import environ
+from corsheaders.defaults import default_headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -156,6 +157,10 @@ CORS_ALLOWED_ORIGINS = env.list(
         "https://www.dgu14thlikelion.shop",
     ],
 )
+# django-cors-headers 기본 허용 헤더 목록엔 우리 커스텀 인증 헤더(X-Device-Code)가
+# 없어서, CORS_ALLOW_ALL_ORIGINS=False인 배포 환경에서는 preflight가 매번 막힌다
+# ("Request header field x-device-code is not allowed"). 기본 목록에 추가만 한다.
+CORS_ALLOW_HEADERS = list(default_headers) + ["x-device-code"]
 
 # OpenAI LLM plan generation.
 # Team convention uses OPEN_AI_API_KEY; OPENAI_API_KEY is accepted only as a
