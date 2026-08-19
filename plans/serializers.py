@@ -218,7 +218,12 @@ class SlotFeedbackSubmitSerializer(serializers.Serializer):
 
 
 class NotificationSerializer(serializers.ModelSerializer):
-    recovery_slot_effective_time = serializers.DateTimeField(source="recovery_slot.effective_time", read_only=True)
+    recovery_slot_effective_time = serializers.SerializerMethodField()
+
+    def get_recovery_slot_effective_time(self, obj):
+        if obj.recovery_slot_id is None:
+            return None
+        return obj.recovery_slot.effective_time
 
     class Meta:
         model = Notification
@@ -226,11 +231,14 @@ class NotificationSerializer(serializers.ModelSerializer):
             "id",
             "recovery_slot",
             "recovery_slot_effective_time",
+            "kind",
             "message",
             "scheduled_at",
             "sent_at",
             "clicked_at",
             "status",
+            "data_json",
+            "delivery_error",
             "created_at",
             "updated_at",
         ]

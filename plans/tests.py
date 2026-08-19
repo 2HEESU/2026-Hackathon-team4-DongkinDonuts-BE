@@ -3,7 +3,7 @@ import uuid
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -24,6 +24,8 @@ from .models import (
     AIInsight,
     AIPlanRun,
     InsightType,
+    Notification,
+    NotificationKind,
     NotificationStatus,
     PlanStatus,
     RecoveryPlan,
@@ -39,6 +41,7 @@ from .services import (
     set_slot_notification,
     today_day_of_week_for_user,
 )
+from .web_push import send_due_notifications
 
 
 class RecoveryPlanServiceTests(TestCase):
@@ -145,13 +148,65 @@ class RecoveryPlanServiceTests(TestCase):
         self.assertFalse(slot.notification_enabled)
         self.assertEqual(slot.repeat_rule, "")
         self.assertEqual(slot.notifications.filter(status=NotificationStatus.PENDING).count(), 0)
+        reengagement = Notification.objects.get(kind=NotificationKind.REENGAGEMENT)
+        self.assertIsNone(reengagement.recovery_slot_id)
+        self.assertEqual(reengagement.user, self.user)
+        self.assertEqual(reengagement.scheduled_at, slot.effective_time + timedelta(days=7))
 
         set_slot_notification(slot=slot, enabled=True, repeat_rule="FREQ=DAILY")
         slot.refresh_from_db()
+        reengagement.refresh_from_db()
 
         self.assertTrue(slot.notification_enabled)
         self.assertEqual(slot.repeat_rule, "FREQ=DAILY")
         self.assertEqual(slot.notifications.filter(status=NotificationStatus.PENDING).count(), 1)
+        self.assertEqual(reengagement.status, NotificationStatus.CANCELED)
+
+    @patch("plans.web_push.send_web_push")
+    def test_send_due_notifications_sends_pending_notification_to_active_subscriptions(self, mock_send_web_push):
+        scheduled_at = timezone.now().replace(microsecond=0)
+        notification = Notification.objects.create(
+            user=self.user,
+            kind=NotificationKind.REENGAGEMENT,
+            message="회복 루틴을 다시 시작해볼까요?",
+            scheduled_at=scheduled_at,
+        )
+        subscription = WebPushSubscription.objects.create(
+            user=self.user,
+            endpoint="https://push.example.test/subscriptions/worker",
+            p256dh="p256dh-key",
+            auth="auth-key",
+            is_active=True,
+        )
+
+        result = send_due_notifications(now=scheduled_at)
+
+        notification.refresh_from_db()
+        self.assertEqual(result.processed_count, 1)
+        self.assertEqual(result.sent_count, 1)
+        self.assertEqual(notification.status, NotificationStatus.SENT)
+        self.assertEqual(notification.sent_at, scheduled_at)
+        self.assertEqual(mock_send_web_push.call_count, 1)
+        sent_subscription, payload = mock_send_web_push.call_args.args
+        self.assertEqual(sent_subscription.id, subscription.id)
+        self.assertEqual(payload["data"]["notification_id"], str(notification.id))
+        self.assertEqual(payload["data"]["kind"], NotificationKind.REENGAGEMENT)
+
+    def test_send_due_notifications_marks_failed_without_active_subscription(self):
+        scheduled_at = timezone.now().replace(microsecond=0)
+        notification = Notification.objects.create(
+            user=self.user,
+            kind=NotificationKind.REENGAGEMENT,
+            message="회복 루틴을 다시 시작해볼까요?",
+            scheduled_at=scheduled_at,
+        )
+
+        result = send_due_notifications(now=scheduled_at)
+
+        notification.refresh_from_db()
+        self.assertEqual(result.failed_count, 1)
+        self.assertEqual(notification.status, NotificationStatus.FAILED)
+        self.assertEqual(notification.delivery_error, "활성 Web Push 구독이 없습니다.")
 
     def test_default_recovery_time_uses_shortest_state_policy_interval(self):
         body_state, _ = StateOption.objects.get_or_create(
@@ -585,6 +640,11 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(len(today_slots_response.data["data"]), 2)
 
     def test_web_push_subscription_create_list_and_delete(self):
+        with override_settings(WEB_PUSH_VAPID_PUBLIC_KEY="public-key"):
+            key_response = self.client.get("/api/v1/plans/notification-subscriptions/vapid-public-key/")
+        self.assertEqual(key_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(key_response.data["data"]["public_key"], "public-key")
+
         create_response = self.client.post(
             "/api/v1/plans/notification-subscriptions/",
             {

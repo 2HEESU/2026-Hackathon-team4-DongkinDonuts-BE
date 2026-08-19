@@ -23,6 +23,11 @@ class NotificationStatus(models.TextChoices):
     CANCELED = "CANCELED", "취소됨"
 
 
+class NotificationKind(models.TextChoices):
+    RECOVERY_SLOT = "RECOVERY_SLOT", "회복 슬롯"
+    REENGAGEMENT = "REENGAGEMENT", "재진입"
+
+
 class InsightType(models.TextChoices):
     TODAY_ANALYSIS = "TODAY_ANALYSIS", "오늘의 분석"
     RECOMMENDATION_REASON = "RECOMMENDATION_REASON", "추천 이유"
@@ -165,11 +170,28 @@ class RecoverySlot(BaseModel):
         return f"RecoverySlot(plan={self.recovery_plan_id}, #{self.sequence_no})"
 
 
-# RecoverySlot에 대한 알림 발송 기록
 class Notification(BaseModel):
-    """ERD: notifications. 실제 발송 인프라(서비스워커/구독관리)는 별도 확인 필요."""
+    """웹 푸시로 보낼 사용자 알림 큐와 발송 이력."""
 
-    recovery_slot = models.ForeignKey(RecoverySlot, on_delete=models.CASCADE, related_name="notifications")
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
+    recovery_slot = models.ForeignKey(
+        RecoverySlot,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="notifications",
+    )
+    kind = models.CharField(
+        max_length=30,
+        choices=NotificationKind.choices,
+        default=NotificationKind.RECOVERY_SLOT,
+    )
     message = models.CharField(max_length=255)
     scheduled_at = models.DateTimeField()
     sent_at = models.DateTimeField(null=True, blank=True)
@@ -177,6 +199,8 @@ class Notification(BaseModel):
     status = models.CharField(
         max_length=20, choices=NotificationStatus.choices, default=NotificationStatus.PENDING
     )
+    data_json = models.JSONField(default=dict, blank=True)
+    delivery_error = models.TextField(blank=True)
 
 
 class WebPushSubscription(BaseModel):
