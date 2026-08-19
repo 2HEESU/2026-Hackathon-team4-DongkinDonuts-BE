@@ -13,6 +13,7 @@ AI_SOURCE_LABELS = {
     "next_activity_plan": "집중 예정 시간",
     "pc_usage_patterns": "디지털 사용 패턴",
     "pc_usage_analysis": "디지털 패턴 분석",
+    "time_policy": "회복 타이머 정책",
     "previous_sessions": "이전 Brainfit 기록",
     "previous_feedback": "이전 피드백",
     "previous_state_frequencies": "이전 상태 기록",

@@ -153,6 +153,34 @@ class RecoveryPlanServiceTests(TestCase):
         self.assertEqual(slot.repeat_rule, "FREQ=DAILY")
         self.assertEqual(slot.notifications.filter(status=NotificationStatus.PENDING).count(), 1)
 
+    def test_default_recovery_time_uses_shortest_state_policy_interval(self):
+        body_state, _ = StateOption.objects.get_or_create(
+            code="BODY_STIFF",
+            defaults={"label": "몸이 굳었어요"},
+        )
+        UserContextSnapshotState.objects.create(
+            context_snapshot=self.context_snapshot,
+            state=body_state,
+            priority=2,
+        )
+        fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
+
+        with patch("plans.services.timezone.now", return_value=fixed_now):
+            plan = create_or_replace_today_plan(
+                user=self.user,
+                context_snapshot=self.context_snapshot,
+                next_activity_plan=self.next_activity_plan,
+            )
+
+        slot = plan.slots.get()
+        self.assertEqual(slot.recommended_at, fixed_now + timedelta(minutes=20))
+        self.assertEqual(slot.interval_minutes, 20)
+        self.assertEqual(plan.generation_snapshot_json["time_policy"]["interval_minutes"], 20)
+        self.assertEqual(
+            plan.generation_snapshot_json["time_policy"]["selected_state_codes"],
+            ["EYE_TIRED"],
+        )
+
     def test_reset_next_activity_replaces_only_one_slot_in_a_multi_slot_day(self):
         PcUsagePattern.objects.create(
             user=self.user,
@@ -451,6 +479,7 @@ class RecoveryPlanApiTests(APITestCase):
         today_day = today_day_of_week_for_user(user)
         PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=14, is_used=True)
         PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=15, is_used=True)
+        fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
 
         shift = ActivityType.objects.create(
             code="shift_neck",
@@ -470,8 +499,8 @@ class RecoveryPlanApiTests(APITestCase):
             name="눈 피로 완화",
             default_duration_sec=60,
         )
-        first_time = (timezone.now() + timedelta(minutes=30)).replace(microsecond=0)
-        second_time = (timezone.now() + timedelta(minutes=90)).replace(microsecond=0)
+        first_time = (fixed_now + timedelta(minutes=30)).replace(microsecond=0)
+        second_time = (fixed_now + timedelta(minutes=90)).replace(microsecond=0)
         mock_create_structured_response.return_value = (
             {
                 "summary": "현재 상태와 PC 사용 패턴을 기준으로 두 번의 회복 세션을 추천합니다.",
@@ -510,20 +539,21 @@ class RecoveryPlanApiTests(APITestCase):
             {"id": "resp_mock"},
         )
 
-        response = self.client.post(
-            "/api/v1/plans/recovery-plans/today/ai-generate/",
-            {
-                "context_snapshot": snapshot_response.data["data"]["id"],
-                "next_activity_plan": activity_plan_response.data["data"]["id"],
-            },
-            format="json",
-        )
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                },
+                format="json",
+            )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(response.data["success"])
         self.assertIsNotNone(response.data["data"]["ai_plan_run"])
         self.assertEqual(len(response.data["data"]["slots"]), 2)
-        self.assertEqual(response.data["data"]["slots"][0]["interval_minutes"], 30)
+        self.assertEqual(response.data["data"]["slots"][0]["interval_minutes"], 45)
         for slot in response.data["data"]["slots"]:
             self.assertEqual(
                 [routine["stage_type"] for routine in slot["routine_instances"]],
@@ -548,6 +578,7 @@ class RecoveryPlanApiTests(APITestCase):
             [activity["code"] for activity in input_snapshot["shift_activity_catalog"]],
             [shift.code],
         )
+        self.assertEqual(input_snapshot["time_policy"]["interval_minutes"], 45)
 
         today_slots_response = self.client.get("/api/v1/plans/recovery-slots/today/")
         self.assertEqual(today_slots_response.status_code, status.HTTP_200_OK)

@@ -1,11 +1,9 @@
 import json
-from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
 
 from common.models import StateOption
@@ -19,9 +17,11 @@ from sessions_app.models import Session, SessionFeedback
 from .models import AIInsight, AIPlanRun, InsightType
 from .openai_client import create_structured_response
 from .services import (
+    build_policy_recommended_times,
     create_or_replace_today_plan,
     get_today_pc_usage_patterns,
     recommend_next_reset_time,
+    recovery_time_policy_for_context,
 )
 
 
@@ -139,7 +139,9 @@ SYSTEM_PROMPT = """
   activity_code 중 하나를 골라야 한다.
 - generation_mode가 SEQUENTIAL_NEXT_ONLY이면 slots는 반드시 1개만 만든다.
 - generation_mode가 WEEK_PATTERN_BATCH이면 오늘 남은 시간 안에서 1~6개의 slots를 만든다.
-- recommended_at은 current_time 이후, plan_date 당일, YYYY-MM-DDTHH:MM:SS 형식으로 쓴다.
+- time_policy.interval_minutes를 추천 간격으로 사용한다. 복수 상태는 더 짧은 간격이 우선이다.
+- recommended_at은 current_time 이후, plan_date 당일, YYYY-MM-DDTHH:MM:SS 형식으로 쓰되
+  서버가 time_policy와 PC 사용 구간에 맞춰 최종 보정한다.
 - difficulty_level은 사용자의 상태와 피드백을 반영하되 활동의 난이도 범위 안에서 정한다.
 - 사용자가 회복 세션을 수행한 뒤 다시 이후 활동을 입력할 수 있으므로, 과도하게 먼 미래의
   결정을 한 슬롯에 몰아넣지 않는다.
@@ -352,6 +354,7 @@ def build_ai_input_snapshot(user, context_snapshot, next_activity_plan):
         "previous_state_frequencies": _serialize_state_frequencies(user),
         "pc_usage_patterns": _serialize_pc_usage_patterns(user),
         "pc_usage_analysis": analyze_pc_usage_patterns(user),
+        "time_policy": recovery_time_policy_for_context(context_snapshot),
         "activity_catalog": _serialize_activity_catalog(),
         "shift_activity_catalog": _serialize_shift_activity_catalog(context_snapshot),
         "routine_generation_policy": {
@@ -380,17 +383,6 @@ def build_input_messages(input_snapshot):
     ]
 
 
-def _parse_recommended_at(value, plan_date):
-    parsed = parse_datetime(str(value))
-    if parsed is None:
-        raise ValidationError(f"AI 추천 시간이 올바르지 않습니다: {value}")
-    if timezone.is_aware(parsed):
-        parsed = timezone.make_naive(parsed)
-    if parsed.date() != plan_date:
-        raise ValidationError("AI 추천 시간은 오늘 날짜 안에 있어야 합니다.")
-    return parsed.replace(microsecond=0)
-
-
 def _safe_int(value, default=None, minimum=None, maximum=None):
     if value is None:
         return default
@@ -405,24 +397,50 @@ def _safe_int(value, default=None, minimum=None, maximum=None):
     return integer
 
 
-def normalize_ai_slots(ai_output, user, next_activity_plan):
-    plan_date = today_for_user(user)
+def _time_policy_reason(policy, raw_reason=None):
+    state_intervals = policy.get("state_intervals") or []
+    if state_intervals:
+        selected_codes = set(policy.get("selected_state_codes") or [])
+        selected_labels = [
+            item["state_label"] for item in state_intervals if item["state_code"] in selected_codes
+        ]
+        if selected_labels:
+            base_reason = (
+                f"{', '.join(selected_labels)} 상태 기준 {policy['interval_minutes']}분 "
+                "회복 타이머 정책을 적용했습니다."
+            )
+        else:
+            base_reason = f"{policy['interval_minutes']}분 회복 타이머 정책을 적용했습니다."
+    else:
+        base_reason = f"기본 {policy['interval_minutes']}분 회복 타이머 정책을 적용했습니다."
+
+    if raw_reason:
+        return f"{base_reason} {raw_reason}"
+    return base_reason
+
+
+def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan):
     now = timezone.now().replace(microsecond=0)
     has_today_pattern = get_today_pc_usage_patterns(user).exists()
+    max_slots = 6 if has_today_pattern else 1
+    policy = recovery_time_policy_for_context(context_snapshot)
+    policy_times = build_policy_recommended_times(
+        user=user,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        base_time=now,
+        max_slots=max_slots,
+    )
+    raw_slots = ai_output.get("slots", [])
     normalized = []
 
-    for raw_slot in ai_output.get("slots", []):
-        try:
-            recommended_at = _parse_recommended_at(raw_slot.get("recommended_at"), plan_date)
-        except ValidationError:
-            continue
-        if recommended_at < now - timedelta(minutes=1):
-            continue
+    for index, recommended_at in enumerate(policy_times):
+        raw_slot = raw_slots[index] if index < len(raw_slots) else {}
         normalized.append(
             {
                 "recommended_at": recommended_at,
-                "interval_minutes": _safe_int(raw_slot.get("interval_minutes"), minimum=5, maximum=240),
-                "reason": raw_slot.get("reason", ""),
+                "interval_minutes": policy["interval_minutes"],
+                "reason": _time_policy_reason(policy, raw_slot.get("reason")),
                 "shift_recommendation": raw_slot.get("shift_recommendation") or {},
             }
         )
@@ -430,15 +448,19 @@ def normalize_ai_slots(ai_output, user, next_activity_plan):
     if not normalized:
         normalized.append(
             {
-                "recommended_at": recommend_next_reset_time(next_activity_plan, base_time=now).replace(microsecond=0),
-                "interval_minutes": next_activity_plan.expected_activity_minutes or 30,
-                "reason": "AI 응답에 유효한 추천 시간이 없어 기본 리셋 시간으로 보정했습니다.",
+                "recommended_at": recommend_next_reset_time(
+                    next_activity_plan,
+                    base_time=now,
+                    context_snapshot=context_snapshot,
+                ).replace(microsecond=0),
+                "interval_minutes": policy["interval_minutes"],
+                "reason": _time_policy_reason(policy, "AI 응답에 유효한 추천 시간이 없어 보정했습니다."),
                 "shift_recommendation": {},
             }
         )
 
     normalized.sort(key=lambda item: item["recommended_at"])
-    return normalized[:6] if has_today_pattern else normalized[:1]
+    return normalized[:max_slots]
 
 
 def _create_plan_insights(plan, ai_output):
@@ -696,7 +718,7 @@ def generate_ai_recovery_plan(
         schema=RECOVERY_PLAN_SCHEMA,
         model=settings.OPENAI_MODEL,
     )
-    normalized_slots = normalize_ai_slots(ai_output, user, next_activity_plan)
+    normalized_slots = normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan)
     return _persist_ai_plan(
         user=user,
         context_snapshot=context_snapshot,

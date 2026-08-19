@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from django.db import transaction
 from django.db.models import Max
@@ -37,6 +37,15 @@ OPEN_SLOT_STATUSES = [
     SlotStatus.CHANGED,
 ]
 
+RECOVERY_INTERVAL_MINUTES_BY_STATE = {
+    "EYE_TIRED": 20,
+    "BODY_STIFF": 30,
+    "LOW_FOCUS": 45,
+    "SLEEPY": 30,
+}
+DEFAULT_RECOVERY_INTERVAL_MINUTES = 45
+MAX_POLICY_RECOMMENDED_TIMES = 6
+
 
 def today_day_of_week_for_user(user):
     today = today_for_user(user)
@@ -55,6 +64,67 @@ def get_today_pc_usage_patterns(user):
 
 def has_today_pc_usage_pattern(user):
     return get_today_pc_usage_patterns(user).exists()
+
+
+def _context_from_inputs(context_snapshot=None, next_activity_plan=None):
+    if context_snapshot is not None:
+        return context_snapshot
+    return getattr(next_activity_plan, "context_snapshot", None)
+
+
+def _state_interval_items(context_snapshot):
+    if context_snapshot is None:
+        return []
+
+    links = context_snapshot.state_links.select_related("state").order_by("priority")
+    items = []
+    for link in links:
+        interval_minutes = RECOVERY_INTERVAL_MINUTES_BY_STATE.get(link.state_id)
+        if interval_minutes is None:
+            continue
+        items.append(
+            {
+                "state_code": link.state_id,
+                "state_label": link.state.label,
+                "priority": link.priority,
+                "interval_minutes": interval_minutes,
+            }
+        )
+    return items
+
+
+def recovery_time_policy_for_context(context_snapshot=None):
+    """
+    첨부 정책집의 상태별 타이머를 서버 기준값으로 계산한다.
+
+    복수 상태가 들어오면 더 짧은 간격을 우선해 피로 누적을 막는다.
+    """
+
+    state_intervals = _state_interval_items(context_snapshot)
+    if state_intervals:
+        interval_minutes = min(item["interval_minutes"] for item in state_intervals)
+        selected = [
+            item for item in state_intervals if item["interval_minutes"] == interval_minutes
+        ]
+        return {
+            "interval_minutes": interval_minutes,
+            "basis": "selected_state_shortest_interval",
+            "state_intervals": state_intervals,
+            "selected_state_codes": [item["state_code"] for item in selected],
+            "reason": "복수 상태 중 가장 짧은 권장 타이머 간격을 적용했습니다.",
+        }
+
+    return {
+        "interval_minutes": DEFAULT_RECOVERY_INTERVAL_MINUTES,
+        "basis": "default_focus_interval",
+        "state_intervals": state_intervals,
+        "selected_state_codes": [],
+        "reason": "정책 매핑 상태가 없어 기본 집중 회복 간격을 적용했습니다.",
+    }
+
+
+def recovery_interval_minutes_for_context(context_snapshot=None):
+    return recovery_time_policy_for_context(context_snapshot)["interval_minutes"]
 
 
 def plan_has_today_pc_usage_pattern(plan):
@@ -116,19 +186,94 @@ def sync_slot_notification(slot):
     return notification
 
 
-def recommend_next_reset_time(next_activity_plan=None, base_time=None):
-    """
-    AI 추천 전까지 쓰는 보수적 기본값.
+def _minute_floor(value):
+    return value.replace(second=0, microsecond=0)
 
-    이후 활동 시간이 있으면 그 시간이 끝나는 시점을 다음 리셋 후보로 보고, 없으면 30분 뒤를
-    사용한다. 실제 추천 모델/프롬프트가 붙으면 view가 recommended_times를 명시 전달하면 된다.
+
+def recommend_next_reset_time(next_activity_plan=None, base_time=None, context_snapshot=None):
+    """
+    AI 추천 전까지 쓰는 정책 기반 기본값.
+
+    첨부 정책집 기준으로 현재 상태별 타이머 간격을 사용한다. 사용자가 시간을 직접
+    지정하는 수동/예약 흐름은 view가 recommended_at/recommended_times를 명시 전달한다.
     """
 
-    base_time = base_time or timezone.now()
-    minutes = 30
-    if next_activity_plan and next_activity_plan.expected_activity_minutes:
-        minutes = next_activity_plan.expected_activity_minutes
+    base_time = _minute_floor(base_time or timezone.now())
+    policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
+    minutes = recovery_interval_minutes_for_context(policy_context)
     return base_time + timedelta(minutes=minutes)
+
+
+def _datetime_at_hour(date_value, hour):
+    if hour >= 24:
+        return datetime.combine(date_value + timedelta(days=1), time.min)
+    return datetime.combine(date_value, time(hour=hour))
+
+
+def _today_pc_usage_windows(user):
+    patterns = list(get_today_pc_usage_patterns(user))
+    if not patterns:
+        return []
+
+    plan_date = today_for_user(user)
+    hours = sorted({pattern.hour for pattern in patterns})
+    windows = []
+    start_hour = previous_hour = hours[0]
+    for hour in hours[1:]:
+        if hour == previous_hour + 1:
+            previous_hour = hour
+            continue
+        windows.append(
+            (_datetime_at_hour(plan_date, start_hour), _datetime_at_hour(plan_date, previous_hour + 1))
+        )
+        start_hour = previous_hour = hour
+    windows.append(
+        (_datetime_at_hour(plan_date, start_hour), _datetime_at_hour(plan_date, previous_hour + 1))
+    )
+    return windows
+
+
+def build_policy_recommended_times(
+    *,
+    user,
+    context_snapshot=None,
+    next_activity_plan=None,
+    base_time=None,
+    max_slots=MAX_POLICY_RECOMMENDED_TIMES,
+):
+    """
+    상태별 타이머 정책을 실제 추천 시각 목록으로 펼친다.
+
+    오늘 PC 사용 패턴이 있으면 남은 사용 구간 안에 정책 간격으로 최대 max_slots개를
+    배치하고, 없으면 다음 세션 1개만 만든다.
+    """
+
+    base_time = _minute_floor(base_time or timezone.now())
+    policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
+    interval_minutes = recovery_interval_minutes_for_context(policy_context)
+    interval = timedelta(minutes=interval_minutes)
+    fallback_time = base_time + interval
+
+    if not has_today_pc_usage_pattern(user):
+        return [fallback_time]
+
+    plan_date = today_for_user(user)
+    recommended_times = []
+    for start_at, end_at in _today_pc_usage_windows(user):
+        if end_at <= base_time:
+            continue
+        candidate = max(start_at, base_time) + interval
+        while (
+            candidate <= end_at
+            and candidate.date() == plan_date
+            and len(recommended_times) < max_slots
+        ):
+            recommended_times.append(candidate)
+            candidate += interval
+        if len(recommended_times) >= max_slots:
+            break
+
+    return recommended_times or [fallback_time]
 
 
 def build_plan_generation_snapshot(user, context_snapshot=None, next_activity_plan=None):
@@ -147,6 +292,7 @@ def build_plan_generation_snapshot(user, context_snapshot=None, next_activity_pl
         "has_pc_usage_pattern": pc_usage_pattern_count > 0,
         "pc_usage_pattern_count": pc_usage_pattern_count,
         "pc_usage_patterns": today_patterns,
+        "time_policy": recovery_time_policy_for_context(context_snapshot),
         "context_snapshot": serialize_context_snapshot(context_snapshot),
         "next_activity_plan": serialize_next_activity_plan(next_activity_plan),
     }
@@ -218,7 +364,9 @@ def create_or_replace_today_plan(
         generation_snapshot_json=generation_snapshot,
     )
 
-    times = list(recommended_times or [recommend_next_reset_time(next_activity_plan)])
+    times = list(recommended_times or [])
+    if not times:
+        times = [None]
     if not generation_snapshot["has_today_pc_usage_pattern"]:
         times = times[:1]
 
@@ -248,13 +396,24 @@ def create_recovery_slot(
 
     locked_plan = RecoveryPlan.objects.select_for_update().get(id=plan.id)
     last_sequence = locked_plan.slots.aggregate(max_sequence=Max("sequence_no"))["max_sequence"] or 0
+    generated_recommended_at = recommended_at is None
+    if generated_recommended_at:
+        recommended_at = recommend_next_reset_time(
+            next_activity_plan,
+            context_snapshot=context_snapshot,
+        )
     slot = RecoverySlot.objects.create(
         recovery_plan=locked_plan,
         ai_plan_run=ai_plan_run,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         sequence_no=last_sequence + 1,
-        recommended_at=recommended_at or recommend_next_reset_time(next_activity_plan),
+        recommended_at=recommended_at,
+        interval_minutes=(
+            recovery_interval_minutes_for_context(_context_from_inputs(context_snapshot, next_activity_plan))
+            if generated_recommended_at
+            else None
+        ),
         notification_enabled=notification_enabled,
     )
     sync_slot_notification(slot)
