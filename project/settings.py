@@ -170,7 +170,20 @@ CORS_ALLOW_HEADERS = list(default_headers) + ["x-device-code"]
 # OpenAI LLM plan generation.
 # Team convention uses OPEN_AI_API_KEY; OPENAI_API_KEY is accepted only as a
 # fallback for local developer environments.
-OPENAI_API_KEY = env("OPEN_AI_API_KEY", default=env("OPENAI_API_KEY", default=""))
+#
+# .env에 키를 붙여넣을 때 메모장/노션 등에서 복사하면 좌우로 스마트따옴표(" ")가
+# 같이 딸려오는 실수가 실제로 있었다 — 그 상태로 Authorization 헤더를 만들면
+# latin-1 인코딩 에러(UnicodeEncodeError)로 요청 자체가 500으로 죽는다. 여기서
+# 미리 벗겨내서, 다음에 또 같은 실수를 해도 서버가 안 죽고 그냥 "키가 유효하지
+# 않다"는 OpenAI 쪽 401만 나게 만든다.
+_QUOTE_CHARS = "\"'“”‘’`"
+
+
+def _strip_wrapping_quotes(value):
+    return value.strip().strip(_QUOTE_CHARS).strip()
+
+
+OPENAI_API_KEY = _strip_wrapping_quotes(env("OPEN_AI_API_KEY", default=env("OPENAI_API_KEY", default="")))
 OPENAI_MODEL = env("OPEN_AI_MODEL", default="gpt-5")
 OPENAI_BASE_URL = env("OPENAI_BASE_URL", default="https://api.openai.com/v1")
 OPENAI_TIMEOUT_SECONDS = env.int("OPENAI_TIMEOUT_SECONDS", default=30)
