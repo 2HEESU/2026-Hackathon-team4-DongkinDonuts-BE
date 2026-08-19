@@ -67,7 +67,8 @@ def build_web_push_payload(notification):
         title = "회복 루틴 다시 시작하기"
     if notification.recovery_slot_id:
         recovery_slot_id = str(notification.recovery_slot_id)
-        url = f"/recovery-slots/{notification.recovery_slot_id}"
+        # /recovery-slots/{id} 라우트는 프론트에 없다 — 회복 루틴 시작 페이지로 보낸다.
+        url = "/handroutine"
     if notification.data_json.get("url"):
         url = notification.data_json["url"]
 
