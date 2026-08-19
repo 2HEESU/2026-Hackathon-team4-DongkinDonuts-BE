@@ -2,6 +2,7 @@ from rest_framework import generics, status
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from common.mixins import EnvelopeMixin
 
@@ -9,9 +10,11 @@ from .models import NextActivityPlan, UserContextSnapshot
 from .serializers import (
     NextActivityPlanCreateSerializer,
     NextActivityPlanSerializer,
+    StateFrequencyQuerySerializer,
     UserContextSnapshotCreateSerializer,
     UserContextSnapshotSerializer,
 )
+from .services import get_state_frequency
 from .utils import today_for_user
 
 
@@ -123,3 +126,19 @@ class NextActivityPlanUpdateView(EnvelopeMixin, generics.UpdateAPIView):
         plan = serializer.save()
         output = NextActivityPlanSerializer(plan)
         return Response(output.data)
+
+
+class StateFrequencyView(EnvelopeMixin, APIView):
+    """
+    GET /context/state-frequency/?days=30 — 최근 N일간 상태(StateOption) 선택 빈도 집계.
+    plans가 AI 추천 시 "이 사용자가 자주 겪는 상태"에 가중치를 주는 근거로 쓴다.
+    """
+
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "options"]
+
+    def get(self, request, *args, **kwargs):
+        query_serializer = StateFrequencyQuerySerializer(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        days = query_serializer.validated_data["days"]
+        return Response(get_state_frequency(request.user, days=days))
