@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from common.models import ActivityTag
+from common.models import ActivityTag, StateOption
 
 from .models import DailyContext, DailyContextActivityTag, DailyContextState, FocusTimeOption
 from .utils import today_for_user
@@ -65,7 +65,9 @@ class DailyContextCreateSerializer(serializers.Serializer):
     """
 
     focus_time_option = serializers.ChoiceField(choices=FocusTimeOption.choices)
-    expected_focus_minutes = serializers.IntegerField(required=False, allow_null=True, default=None)
+    expected_focus_minutes = serializers.IntegerField(
+        required=False, allow_null=True, default=None, min_value=1
+    )
     tags_skipped = serializers.BooleanField(default=False)
     note = serializers.CharField(required=False, allow_blank=True, default="")
     activity_tags = serializers.ListField(child=serializers.CharField(), required=False, default=list)
@@ -73,6 +75,26 @@ class DailyContextCreateSerializer(serializers.Serializer):
     # POST에선 반드시 보내야 하고(partial 아니므로), PATCH에선 아예 안 보내면 건드리지 않지만
     # 보낼 거면 최소 1개는 있어야 한다(빈 리스트로 지우는 것 금지).
     state_options = serializers.ListField(child=serializers.CharField(), allow_empty=False)
+
+    def validate_activity_tags(self, value):
+        # 활동 태그는 없는 코드가 오면 커스텀 태그로 자동 생성되므로(get_or_create),
+        # 여기서는 같은 값이 중복으로 들어와서 DB의 UniqueConstraint를 건드리는 것만 막는다.
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("중복된 활동 태그가 있습니다.")
+        return value
+
+    def validate_state_options(self, value):
+        # state는 activity_tags와 달리 고정 카탈로그라 자동 생성하지 않는다 — 존재하지 않는
+        # 코드가 오면 DB단 FK 에러(500)로 죽기 전에 여기서 깔끔한 400으로 막는다.
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("중복된 상태 옵션이 있습니다.")
+        existing = set(
+            StateOption.objects.filter(code__in=value, is_active=True).values_list("code", flat=True)
+        )
+        missing = [code for code in value if code not in existing]
+        if missing:
+            raise serializers.ValidationError(f"존재하지 않는 상태 옵션입니다: {', '.join(missing)}")
+        return value
 
     def validate(self, attrs):
         option = attrs.get("focus_time_option")
