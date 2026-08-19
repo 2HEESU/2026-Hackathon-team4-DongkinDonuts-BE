@@ -12,6 +12,8 @@ from .serializers import (
     SessionEventSerializer,
     SessionSerializer,
     SessionStartSerializer,
+    SessionFeedbackCreateSerializer,
+    SessionFeedbackSerializer,
 )
 from .services import (
     abort_session,
@@ -19,6 +21,7 @@ from .services import (
     create_session_event,
     reset_session,
     start_session,
+    create_session_feedback,
 )
 
 # Create your views here.
@@ -202,5 +205,40 @@ class SessionEventCreateView(EnvelopeMixin, APIView):
 
         return Response(
             SessionEventSerializer(event).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+class SessionFeedbackCreateView(EnvelopeMixin, APIView):
+    """
+    POST /api/v1/sessions/feedback/
+    세션 완료 후 슬롯 단위 사용자 피드백 저장
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        request_serializer = SessionFeedbackCreateSerializer(
+            data=request.data,
+        )
+        request_serializer.is_valid(raise_exception=True)
+
+        feedback = create_session_feedback(
+            user=request.user,
+            recovery_slot_id=request_serializer.validated_data[
+                "recovery_slot_id"
+            ],
+            recovery_feeling=request_serializer.validated_data.get(
+                "recovery_feeling"
+            ),
+            difficulty_feedback=request_serializer.validated_data.get(
+                "difficulty_feedback"
+            ),
+            skipped=request_serializer.validated_data.get(
+                "skipped", False
+            ),
+        )
+
+        return Response(
+            SessionFeedbackSerializer(feedback).data,
             status=status.HTTP_201_CREATED,
         )

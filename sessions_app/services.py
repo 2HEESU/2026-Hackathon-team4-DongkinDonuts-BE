@@ -15,7 +15,7 @@ from routines.models import (
 )
 
 from .exceptions import Conflict
-from .models import Session, SessionEvent, SessionStatus
+from .models import Session, SessionEvent, SessionStatus, SessionFeedback
 
 
 def start_session(
@@ -398,3 +398,33 @@ def _calculate_duration_sec(*, started_at, ended_at):
 
     # 서버 시각 오차 등 음수가 저장되지 않도록 방어
     return max(0, duration)
+
+def create_session_feedback(
+    *,
+    user,
+    recovery_slot_id,
+    recovery_feeling=None,
+    difficulty_feedback=None,
+    skipped=False,
+):
+    try:
+        recovery_slot = RecoverySlot.objects.get(
+            pk=recovery_slot_id,
+            recovery_plan__user=user,
+        )
+    except RecoverySlot.DoesNotExist as exc:
+        raise NotFound(
+            "회복 슬롯을 찾을 수 없습니다.",
+        ) from exc
+
+    feedback, created = SessionFeedback.objects.update_or_create(
+        recovery_slot=recovery_slot,
+        defaults={
+            "user": user,
+            "recovery_feeling": recovery_feeling,
+            "difficulty_feedback": difficulty_feedback,
+            "skipped": skipped,
+        },
+    )
+
+    return feedback
