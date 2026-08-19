@@ -57,3 +57,22 @@ class SessionCompleteSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+
+class SessionEventCreateSerializer(serializers.Serializer):
+    event_type = serializers.CharField(max_length=50)
+    step_no = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+        max_value=4,
+        error_messages={
+            "min_value": "step_no는 1~4 사이의 숫자여야 합니다.",
+            "max_value": "step_no는 1~4 사이의 숫자여야 합니다.",
+        },
+    )
+    message = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
