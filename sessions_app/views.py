@@ -8,12 +8,15 @@ from common.mixins import EnvelopeMixin
 from .models import Session, SessionStatus
 from .serializers import (
     SessionCompleteSerializer,
+    SessionEventCreateSerializer,
+    SessionEventSerializer,
     SessionSerializer,
     SessionStartSerializer,
 )
 from .services import (
     abort_session,
     complete_session,
+    create_session_event,
     reset_session,
     start_session,
 )
@@ -173,4 +176,31 @@ class SessionCompleteView(EnvelopeMixin, APIView):
         return Response(
             SessionSerializer(session).data,
             status=status.HTTP_200_OK,
+        )
+
+class SessionEventCreateView(EnvelopeMixin, APIView):
+    """
+    POST /api/v1/sessions/{id}/events/
+    세션 진행 중 이벤트 기록 (카메라 끊김 등)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, id):
+        request_serializer = SessionEventCreateSerializer(
+            data=request.data,
+        )
+        request_serializer.is_valid(raise_exception=True)
+
+        event = create_session_event(
+            user=request.user,
+            session_id=id,
+            event_type=request_serializer.validated_data["event_type"],
+            step_no=request_serializer.validated_data.get("step_no"),
+            message=request_serializer.validated_data.get("message", ""),
+        )
+
+        return Response(
+            SessionEventSerializer(event).data,
+            status=status.HTTP_201_CREATED,
         )

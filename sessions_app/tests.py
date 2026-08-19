@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from django.urls import reverse 
 
 from django.utils import timezone
 from rest_framework import status
@@ -551,3 +552,110 @@ class SessionAbortCompleteApiTest(APITestCase):
             session.status,
             SessionStatus.IN_PROGRESS,
         )
+
+class SessionEventCreateAPITest(APITestCase):
+    def setUp(self):
+        # User.objects.create_user 대신 User.objects.create() 사용
+        self.user = User.objects.create()
+        self.other_user = User.objects.create()
+
+        self.client.credentials(
+            HTTP_X_DEVICE_CODE=str(self.user.id),
+        )
+
+        self.daily_context = DailyContext.objects.create(
+            user=self.user,
+            service_date=date.today(),
+            focus_time_option=FocusTimeOption.SKIPPED,
+            tags_skipped=True,
+        )
+
+        self.plan = RecoveryPlan.objects.create(
+            user=self.user,
+            daily_context=self.daily_context,
+            plan_date=date.today(),
+        )
+
+        self.slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=1,
+            recommended_at=timezone.now(),
+            scheduled_at=timezone.now(),
+            status=SlotStatus.STARTED,
+        )
+
+        self.activity = ActivityType.objects.create(
+            code="WAKE_TEST_EVENT",
+            stage_type=StageType.BRAIN_WAKE,
+            name="Brain Wake 테스트",
+            purpose="테스트",
+            required_landmarks=[],
+            default_duration_sec=60,
+        )
+
+        self.routine_instance = RoutineInstance.objects.create(
+            recovery_slot=self.slot,
+            activity=self.activity,
+            sequence_no=1,
+            difficulty_level=1,
+            planned_duration_sec=60,
+            status=RoutineInstanceStatus.IN_PROGRESS,
+        )
+
+        self.session = Session.objects.create(
+            user=self.user,
+            recovery_slot=self.slot,
+            routine_instance=self.routine_instance,
+            activity=self.activity,
+            started_at=timezone.now(),
+            status=SessionStatus.IN_PROGRESS,
+            camera_permission_status=CameraPermissionStatus.GRANTED,
+        )
+
+    def test_create_session_event_success(self):
+        url = f"/api/v1/sessions/{self.session.id}/events/"
+        payload = {
+            "event_type": "CAMERA_DISCONNECTED",
+            "step_no": 2,
+            "message": "카메라 연결이 해제되었습니다.",
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["data"]["event_type"], "CAMERA_DISCONNECTED")
+        self.assertEqual(response.data["data"]["step_no"], 2)
+
+    def test_create_session_event_invalid_step_no(self):
+        url = f"/api/v1/sessions/{self.session.id}/events/"
+        payload = {
+            "event_type": "CAMERA_DISCONNECTED",
+            "step_no": 5,  # 1~4 범위를 벗어남
+        }
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_session_event_other_user_session_denied(self):
+        self.client.credentials(
+            HTTP_X_DEVICE_CODE=str(self.other_user.id),
+        )
+        url = f"/api/v1/sessions/{self.session.id}/events/"
+        payload = {"event_type": "CAMERA_DISCONNECTED"}
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_create_session_event_completed_session_conflict(self):
+        self.session.status = SessionStatus.COMPLETED
+        self.session.save()
+
+        url = f"/api/v1/sessions/{self.session.id}/events/"
+        payload = {"event_type": "CAMERA_DISCONNECTED"}
+
+        response = self.client.post(url, payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)

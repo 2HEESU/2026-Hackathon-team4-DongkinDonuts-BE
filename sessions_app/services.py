@@ -342,6 +342,36 @@ def complete_session(
         # API 응답에는 next_routine_instance를 임의로 추가하지 않음
         return session
 
+def create_session_event(
+    *,
+    user,
+    session_id,
+    event_type,
+    step_no=None,
+    message="",
+):
+    try:
+        session = Session.objects.get(
+            pk=session_id,
+            user=user,
+        )
+    except Session.DoesNotExist as exc:
+        raise NotFound(
+            "세션을 찾을 수 없습니다.",
+        ) from exc
+    
+    if session.status != SessionStatus.IN_PROGRESS:
+        raise Conflict(
+            "진행 중인 세션에만 이벤트를 기록할 수 있습니다.",
+        )
+    
+    return SessionEvent.objects.create(
+        session=session,
+        event_type=event_type,
+        step_no=step_no,
+        message=message,
+    )
+
 def _get_session_for_update(*, user, session_id):
     try:
         return (

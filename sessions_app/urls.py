@@ -5,6 +5,7 @@ from .views import (
     SessionAbortView,
     SessionCompleteView,
     SessionDetailView,
+    SessionEventCreateView,
     SessionResetView,
     SessionStartView,
 )
@@ -36,6 +37,11 @@ urlpatterns = [
         "<uuid:id>/complete/",
         SessionCompleteView.as_view(),
         name="session-complete",
+    ),
+    path(
+        "<uuid:id>/events/",
+        SessionEventCreateView.as_view(),
+        name="session-event-create",
     ),
     path(
         "<uuid:id>/",
