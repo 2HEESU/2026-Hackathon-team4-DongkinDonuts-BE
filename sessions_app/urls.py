@@ -2,6 +2,8 @@ from django.urls import path
 
 from .views import (
     ActiveSessionView,
+    SessionAbortView,
+    SessionCompleteView,
     SessionDetailView,
     SessionResetView,
     SessionStartView,
@@ -24,6 +26,16 @@ urlpatterns = [
         "<uuid:id>/reset/",
         SessionResetView.as_view(),
         name="session-reset",
+    ),
+    path(
+        "<uuid:id>/abort/",
+        SessionAbortView.as_view(),
+        name="session-abort",
+    ),
+    path(
+        "<uuid:id>/complete/",
+        SessionCompleteView.as_view(),
+        name="session-complete",
     ),
     path(
         "<uuid:id>/",
