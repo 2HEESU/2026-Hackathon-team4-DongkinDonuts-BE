@@ -18,6 +18,7 @@ from .views import (
     RecoverySlotResetNextActivityView,
     RecoverySlotScheduleView,
     RecoverySlotTodayListView,
+    WebPushVapidPublicKeyView,
     WebPushSubscriptionDeleteView,
     WebPushSubscriptionListCreateView,
 )
@@ -69,6 +70,11 @@ urlpatterns = [
         "notification-subscriptions/",
         WebPushSubscriptionListCreateView.as_view(),
         name="notification-subscription-list-create",
+    ),
+    path(
+        "notification-subscriptions/vapid-public-key/",
+        WebPushVapidPublicKeyView.as_view(),
+        name="notification-subscription-vapid-public-key",
     ),
     path(
         "notification-subscriptions/<uuid:pk>/",

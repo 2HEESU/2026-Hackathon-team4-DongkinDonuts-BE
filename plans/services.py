@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta
 
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -13,6 +13,7 @@ from sessions_app.models import SessionFeedback
 
 from .models import (
     Notification,
+    NotificationKind,
     NotificationStatus,
     PlanStatus,
     RecoveryPlan,
@@ -159,6 +160,63 @@ def build_notification_message(slot):
     return f"{slot.effective_time:%H:%M} 회복 세션을 시작할 시간입니다."
 
 
+def build_reengagement_message(scheduled_at):
+    return f"{scheduled_at:%H:%M}에 짧은 회복 루틴을 다시 시작해볼까요?"
+
+
+def notification_user_filter(user):
+    return Q(user=user) | Q(user__isnull=True, recovery_slot__recovery_plan__user=user)
+
+
+def pending_notifications_for_user(user):
+    return Notification.objects.filter(status=NotificationStatus.PENDING).filter(notification_user_filter(user))
+
+
+def cancel_pending_reengagement_notifications(*, user):
+    return Notification.objects.filter(
+        user=user,
+        kind=NotificationKind.REENGAGEMENT,
+        status=NotificationStatus.PENDING,
+    ).update(status=NotificationStatus.CANCELED, updated_at=timezone.now())
+
+
+def first_slot_for_reengagement(reference_slot):
+    plan = reference_slot.recovery_plan
+    return (
+        RecoverySlot.objects.filter(recovery_plan__user=plan.user, recovery_plan__plan_date=plan.plan_date)
+        .annotate(effective_at=Coalesce("user_changed_at", "scheduled_at", "recommended_at"))
+        .order_by("effective_at", "sequence_no")
+        .first()
+    )
+
+
+def schedule_reengagement_notification_if_needed(*, user, reference_slot):
+    if pending_notifications_for_user(user).exists():
+        return None
+
+    source_slot = first_slot_for_reengagement(reference_slot)
+    if source_slot is None:
+        return None
+
+    scheduled_at = source_slot.effective_time + timedelta(days=7)
+    now = timezone.now()
+    while scheduled_at <= now:
+        scheduled_at += timedelta(days=7)
+
+    return Notification.objects.create(
+        user=user,
+        recovery_slot=None,
+        kind=NotificationKind.REENGAGEMENT,
+        message=build_reengagement_message(scheduled_at),
+        scheduled_at=scheduled_at,
+        data_json={
+            "source_recovery_slot": str(source_slot.id),
+            "source_plan_date": str(source_slot.recovery_plan.plan_date),
+            "url": "/",
+        },
+    )
+
+
 def sync_slot_notification(slot):
     """
     슬롯 알림 설정을 Notification 발신 대기 목록과 맞춘다.
@@ -167,22 +225,29 @@ def sync_slot_notification(slot):
     해당 슬롯에 알림을 켰는지의 설정값이다.
     """
 
-    pending_notifications = slot.notifications.filter(status=NotificationStatus.PENDING)
+    pending_notifications = slot.notifications.filter(
+        kind=NotificationKind.RECOVERY_SLOT,
+        status=NotificationStatus.PENDING,
+    )
     if slot.status not in OPEN_SLOT_STATUSES or not slot.notification_enabled:
         pending_notifications.update(status=NotificationStatus.CANCELED)
         return None
 
+    cancel_pending_reengagement_notifications(user=slot.recovery_plan.user)
     notification = pending_notifications.order_by("-created_at").first()
     if notification is None:
         return Notification.objects.create(
+            user=slot.recovery_plan.user,
             recovery_slot=slot,
+            kind=NotificationKind.RECOVERY_SLOT,
             message=build_notification_message(slot),
             scheduled_at=slot.effective_time,
         )
 
+    notification.user = slot.recovery_plan.user
     notification.message = build_notification_message(slot)
     notification.scheduled_at = slot.effective_time
-    notification.save(update_fields=["message", "scheduled_at", "updated_at"])
+    notification.save(update_fields=["user", "message", "scheduled_at", "updated_at"])
     return notification
 
 
@@ -518,6 +583,11 @@ def set_slot_notification(*, slot, enabled, repeat_rule=""):
     slot.repeat_rule = repeat_rule if enabled else ""
     slot.save(update_fields=["notification_enabled", "repeat_rule", "updated_at"])
     sync_slot_notification(slot)
+    if not enabled:
+        schedule_reengagement_notification_if_needed(
+            user=slot.recovery_plan.user,
+            reference_slot=slot,
+        )
     return slot
 
 

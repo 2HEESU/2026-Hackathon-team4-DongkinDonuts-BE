@@ -1,4 +1,5 @@
 from django.shortcuts import get_object_or_404
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.exceptions import NotFound
@@ -34,6 +35,7 @@ from .services import (
     deactivate_web_push_subscription,
     get_next_slot_for_user,
     mark_notification_clicked,
+    notification_user_filter,
     reset_next_activity_and_slot,
     schedule_slot_time,
     set_slot_notification,
@@ -349,8 +351,8 @@ class NotificationListView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         queryset = (
-            Notification.objects.select_related("recovery_slot")
-            .filter(recovery_slot__recovery_plan__user=self.request.user)
+            Notification.objects.select_related("user", "recovery_slot", "recovery_slot__recovery_plan")
+            .filter(notification_user_filter(self.request.user))
             .order_by("-scheduled_at", "-created_at")
         )
         status_value = self.request.query_params.get("status")
@@ -366,12 +368,20 @@ class NotificationClickView(EnvelopeMixin, APIView):
 
     def post(self, request, pk):
         notification = get_object_or_404(
-            Notification,
+            Notification.objects.filter(notification_user_filter(request.user)),
             pk=pk,
-            recovery_slot__recovery_plan__user=request.user,
         )
         notification = mark_notification_clicked(notification=notification)
         return Response(NotificationSerializer(notification).data)
+
+
+class WebPushVapidPublicKeyView(EnvelopeMixin, APIView):
+    """GET /plans/notification-subscriptions/vapid-public-key/ — PushManager 구독용 VAPID 공개키."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"public_key": settings.WEB_PUSH_VAPID_PUBLIC_KEY})
 
 
 class WebPushSubscriptionListCreateView(EnvelopeMixin, APIView):
