@@ -22,9 +22,9 @@ class StateFrequencyQuerySerializer(serializers.Serializer):
 
 def _get_or_create_activity_tags(codes, user):
     """
-    activity_tags로 들어온 문자열 목록을 ActivityTag로 매핑한다. 이미 있는 코드(기본
-    제공 태그, 또는 이 사용자가 예전에 만든 커스텀 태그)면 그대로 쓰고, 없으면 "+
-    직접입력"으로 새로 만든 것으로 보고 created_by=user로 새 ActivityTag를 만든다.
+    activity_tags로 들어온 문자열 목록을 ActivityTag로 매핑한다.
+    이미 있는 코드(기본 제공 태그, 또는 이 사용자가 예전에 만든 커스텀 태그)면 그대로 쓰고,
+    없으면 "+ 직접입력"으로 새로 만든 것으로 보고 created_by=user로 새 ActivityTag를 만든다.
     """
     tags = []
     for code in codes:
