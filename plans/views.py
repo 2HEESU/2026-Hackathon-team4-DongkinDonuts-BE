@@ -1,5 +1,6 @@
 from django.shortcuts import get_object_or_404
 from django.conf import settings
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.exceptions import NotFound
@@ -227,10 +228,19 @@ class RecoverySlotHistoryView(EnvelopeMixin, generics.ListAPIView):
             if filters.get("end_date"):
                 queryset = queryset.filter(recovery_plan__plan_date__lte=filters["end_date"])
 
+        # 화면에는 effective_time(user_changed_at → scheduled_at → recommended_at 순
+        # 우선순위, RecoverySlot.effective_time 프로퍼티와 동일한 로직)을 보여주는데,
+        # 정렬은 recommended_at만 보고 있었다. "시간 변경하기"로 시각을 바꾼 슬롯이
+        # 있으면 화면에 보이는 시간과 실제 정렬 순서가 어긋나서 표가 뒤죽박죽으로
+        # 보이는 버그가 있었다 — 같은 우선순위로 annotate해서 그걸로 정렬한다.
+        queryset = queryset.annotate(
+            effective_time_sort=Coalesce("user_changed_at", "scheduled_at", "recommended_at")
+        )
+
         return queryset.order_by(
             "-recovery_plan__plan_date",
-            "-recommended_at",
-            "-created_at",
+            "effective_time_sort",
+            "created_at",
         )
 
 
