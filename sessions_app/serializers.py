@@ -1,0 +1,50 @@
+from rest_framework import serializers
+
+from common.constants import CameraPermissionStatus
+from routines.serializers import ActivityTypeSerializer
+
+from .models import Session, SessionEvent
+
+class SessionEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SessionEvent
+        fields = [
+            "id",
+            "event_type",
+            "step_no",
+            "message",
+            "created_at",
+        ]
+
+class SessionSerializer(serializers.ModelSerializer):
+    recovery_slot_id = serializers.UUIDField(read_only=True)
+    routine_instance_id = serializers.UUIDField(read_only=True)
+    activity = ActivityTypeSerializer(read_only=True)
+    events = SessionEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Session
+        fields = [
+            "id",
+            "recovery_slot_id",
+            "routine_instance_id",
+            "activity",
+            "started_at",
+            "ended_at",
+            "duration_sec",
+            "accuracy",
+            "streak_count",
+            "metrics",
+            "status",
+            "camera_permission_status",
+            "reset_count",
+            "events",
+            "created_at",
+            "updated_at",
+        ]
+
+class SessionStartSerializer(serializers.Serializer):
+    routine_instance_id = serializers.UUIDField()
+    camera_permission_status = serializers.ChoiceField(
+        choices=CameraPermissionStatus.choices,
+    )
