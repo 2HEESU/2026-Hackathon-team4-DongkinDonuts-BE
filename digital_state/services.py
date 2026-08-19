@@ -1,3 +1,5 @@
+from context.utils import today_for_user
+
 from .models import DayOfWeek, PcUsagePattern
 
 DAY_ORDER = [
@@ -94,6 +96,32 @@ def summarize_time_of_day_pattern(used_patterns):
         "label": label,
         "segments": segments,
         "counts": {"morning": morning_count, "afternoon": afternoon_count},
+    }
+
+
+def get_pattern_status(user):
+    """
+    '이 사용자가 PC 사용 패턴 맞춤 설정을 했는지'를 서버가 판단해서 내려준다.
+
+    has_any_pattern/has_pattern_for_today 둘 다 is_used 값과 무관하게 row가 있는지만
+    본다 — 모델 docstring 기준대로, "명시적으로 미사용 체크"도 "입력함"으로 쳐야 하고
+    (is_used=False), row 자체가 없는 것과는 구분해야 하기 때문이다.
+
+    - has_any_pattern: 온보딩 간소화 여부(맞춤 설정 완료 사용자인지) 판단용.
+    - has_pattern_for_today: AI가 오늘 하루치 일정을 한 번에 만들지, 다음 휴식
+      하나만 추천할지 분기하는 기준(모델 docstring에 명시된 기준 그대로).
+    """
+    has_any_pattern = PcUsagePattern.objects.filter(user=user).exists()
+
+    today = today_for_user(user)
+    today_day_of_week = DAY_ORDER[today.weekday()]
+    has_pattern_for_today = PcUsagePattern.objects.filter(
+        user=user, day_of_week=today_day_of_week
+    ).exists()
+
+    return {
+        "has_any_pattern": has_any_pattern,
+        "has_pattern_for_today": has_pattern_for_today,
     }
 
 

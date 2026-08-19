@@ -10,7 +10,7 @@ from common.mixins import EnvelopeMixin
 
 from .models import DayOfWeek, PcUsagePattern
 from .serializers import PcUsagePatternItemSerializer, PcUsagePatternSerializer
-from .services import analyze_pc_usage_patterns
+from .services import analyze_pc_usage_patterns, get_pattern_status
 
 # day_of_week가 문자열(CharField)이라 그냥 정렬하면 월~일 순서가 안 나옴 —
 # 화면에 보여줄 순서를 여기서 직접 정의해서 정렬 키로 쓴다.
@@ -95,3 +95,17 @@ class PcUsagePatternAnalysisView(EnvelopeMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         return Response(analyze_pc_usage_patterns(request.user))
+
+
+class PcUsagePatternStatusView(EnvelopeMixin, APIView):
+    """
+    GET /digital-state/patterns/status/ — PC 사용 패턴 맞춤 설정 여부 판별(가벼운 플래그).
+    온보딩 질문 분기, AI 하루치 일정 vs 단건 추천 분기 등에서 매번 전체 목록을 받아
+    직접 계산하지 않아도 되게 서버가 미리 판단해서 내려준다.
+    """
+
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "options"]
+
+    def get(self, request, *args, **kwargs):
+        return Response(get_pattern_status(request.user))
