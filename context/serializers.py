@@ -57,19 +57,13 @@ class UserContextSnapshotSerializer(serializers.ModelSerializer):
 
 
 class UserContextSnapshotCreateSerializer(serializers.Serializer):
-    """
-    UserContextSnapshot 생성/수정 입력용.
-    """
+    """UserContextSnapshot 생성/수정 입력용."""
 
     note = serializers.CharField(required=False, allow_blank=True, default="")
-    # 이슈 #13: state는 더 이상 건너뛸 수 없음 — required=True(기본값) + allow_empty=False라서
-    # POST에선 반드시 보내야 하고(partial 아니므로), PATCH에선 아예 안 보내면 건드리지 않지만
-    # 보낼 거면 최소 1개는 있어야 한다(빈 리스트로 지우는 것 금지).
+    # state 정보 없이는 회복 루틴 추천이 성립하지 않으므로 최소 1개 선택을 요구한다.
     state_options = serializers.ListField(child=serializers.CharField(), allow_empty=False)
 
     def validate_state_options(self, value):
-        # state는 activity_tags와 달리 고정 카탈로그라 자동 생성하지 않는다 — 존재하지 않는
-        # 코드가 오면 DB단 FK 에러(500)로 죽기 전에 여기서 깔끔한 400으로 막는다.
         if len(value) != len(set(value)):
             raise serializers.ValidationError("중복된 상태 옵션이 있습니다.")
         existing = set(
@@ -155,8 +149,6 @@ class NextActivityPlanCreateSerializer(serializers.Serializer):
         return value
 
     def validate_activity_tags(self, value):
-        # 활동 태그는 없는 코드가 오면 커스텀 태그로 자동 생성되므로(get_or_create),
-        # 여기서는 같은 값이 중복으로 들어와서 DB의 UniqueConstraint를 건드리는 것만 막는다.
         if len(value) != len(set(value)):
             raise serializers.ValidationError("중복된 활동 태그가 있습니다.")
         return value

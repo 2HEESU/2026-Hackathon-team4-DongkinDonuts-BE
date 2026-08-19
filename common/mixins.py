@@ -17,6 +17,11 @@ class EnvelopeMixin:
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
+        # 204는 HTTP 스펙상 몸통이 없어야 하는 응답이라 감싸지 않는다. runserver(wsgiref)는
+        # 몸통을 자동으로 안 지워주는 걸 확인했기 때문에, 여기서 직접 비워서 확실히 보장한다.
+        if response.status_code == 204:
+            response.data = None
+            return response
         if isinstance(response, Response) and response.status_code < 400:
             data = response.data
             already_wrapped = isinstance(data, dict) and "success" in data

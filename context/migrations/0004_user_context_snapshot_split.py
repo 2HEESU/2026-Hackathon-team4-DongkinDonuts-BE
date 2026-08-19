@@ -32,7 +32,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ("accounts", "0003_remove_user_is_anonymous"),
         ("common", "0002_alter_stateoption_default_difficulty"),
-        ("context", "0003_remove_dailycontext_unique_user_service_date"),
+        ("context", "0004_remove_dailycontext_state_skipped"),
         ("digital_state", "0006_remove_pcusagepattern_unique_pattern_per_user_day_slot_and_more"),
         ("plans", "0008_remove_aiplanrun_pc_usage_patterns_and_more"),
     ]
@@ -124,10 +124,6 @@ class Migration(migrations.Migration):
         migrations.RemoveField(
             model_name="usercontextsnapshot",
             name="focus_time_option",
-        ),
-        migrations.RemoveField(
-            model_name="usercontextsnapshot",
-            name="state_skipped",
         ),
         migrations.RemoveField(
             model_name="usercontextsnapshot",
