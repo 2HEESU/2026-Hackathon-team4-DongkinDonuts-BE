@@ -146,3 +146,11 @@ REST_FRAMEWORK = {
 }
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
+
+# OpenAI LLM plan generation.
+# Team convention uses OPEN_AI_API_KEY; OPENAI_API_KEY is accepted only as a
+# fallback for local developer environments.
+OPENAI_API_KEY = env("OPEN_AI_API_KEY", default=env("OPENAI_API_KEY", default=""))
+OPENAI_MODEL = env("OPEN_AI_MODEL", default="gpt-5")
+OPENAI_BASE_URL = env("OPENAI_BASE_URL", default="https://api.openai.com/v1")
+OPENAI_TIMEOUT_SECONDS = env.int("OPENAI_TIMEOUT_SECONDS", default=30)

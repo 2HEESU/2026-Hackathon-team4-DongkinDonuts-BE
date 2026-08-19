@@ -9,7 +9,7 @@ class EnvelopeMixin:
     여기서는 신경 쓰지 않는다.
 
     사용법: view 정의할 때 DRF generic view보다 먼저 상속하면 된다.
-        class DailyContextListView(EnvelopeMixin, generics.ListCreateAPIView):
+        class UserContextSnapshotListView(EnvelopeMixin, generics.ListCreateAPIView):
             ...
 
     이미 success_response()로 직접 감싼 응답(커스텀 액션 등)은 중복으로 안 감싼다.
