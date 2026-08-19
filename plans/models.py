@@ -52,13 +52,21 @@ class AIPlanRun(BaseModel):
     AIPlanRun과의 M2M 연결이 조용히 끊어짐. AIPlanRun의 목적 자체가 "그 당시 뭘 보고
     추천했는지" 기록하는 것이라, 변경 가능한 DB row를 참조하는 대신 아래
     input_snapshot_json에 당시 값을 그대로 스냅샷으로 저장한다.
-    예: {"previous_sessions": [...], "previous_feedback": [...],
+    예: {"context_snapshot": {...}, "next_activity_plan": {...},
+         "previous_sessions": [...], "previous_feedback": [...],
          "pc_usage_patterns": [{"day_of_week": "MON", ...}]}
     """
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="ai_plan_runs")
-    daily_context = models.ForeignKey(
-        "context.DailyContext", on_delete=models.CASCADE, related_name="ai_plan_runs"
+    context_snapshot = models.ForeignKey(
+        "context.UserContextSnapshot", on_delete=models.CASCADE, related_name="ai_plan_runs"
+    )
+    next_activity_plan = models.ForeignKey(
+        "context.NextActivityPlan",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ai_plan_runs",
     )
     model_name = models.CharField(max_length=100)
     input_snapshot_json = models.JSONField()
@@ -73,6 +81,9 @@ class RecoveryPlan(BaseModel):
     """
     ERD: recovery_plans.
 
+    사용자의 하루 회복 일정 컨테이너다. PC 패턴 기반인지 여부는 enum/boolean으로 중복 저장하지
+    않고, generation_snapshot_json과 AIPlanRun.input_snapshot_json에 생성 당시 입력으로 남긴다.
+
     overall_reason / data_source_summary는 ai_insights와 겹쳐서 제거함(ai_reason을
     ai_insights로 합쳤을 때와 같은 논리). 플랜 전체 단위 설명이 필요하면 AIInsight를
     recovery_plan만 걸고(recovery_slot/routine_instance는 null) 만들면 된다 —
@@ -81,11 +92,9 @@ class RecoveryPlan(BaseModel):
     """
 
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="recovery_plans")
-    daily_context = models.ForeignKey(
-        "context.DailyContext", on_delete=models.CASCADE, related_name="recovery_plans"
-    )
     ai_plan_run = models.ForeignKey(AIPlanRun, on_delete=models.SET_NULL, null=True, related_name="recovery_plans")
     plan_date = models.DateField(db_index=True)
+    generation_snapshot_json = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=PlanStatus.choices, default=PlanStatus.ACTIVE)
 
     class Meta:
@@ -106,16 +115,40 @@ class RecoveryPlan(BaseModel):
 class RecoverySlot(BaseModel):
     """
     ERD: recovery_slots.
-    ai_reason 컬럼은 이번에 제거함 — ai_insights(recovery_slot_id로 연결)로 일원화.
+    ai_reason 컬럼은 제거함 — ai_insights(recovery_slot_id로 연결)로 일원화.
+    순차 생성 흐름에서 슬롯마다 다른 상태 스냅샷/이후 활동 계획을 기준으로 만들어질 수 있으므로
+    context_snapshot, next_activity_plan을 슬롯에 직접 연결한다.
     """
 
     recovery_plan = models.ForeignKey(RecoveryPlan, on_delete=models.CASCADE, related_name="slots")
+    ai_plan_run = models.ForeignKey(
+        AIPlanRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recovery_slots",
+    )
+    context_snapshot = models.ForeignKey(
+        "context.UserContextSnapshot",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recovery_slots",
+    )
+    next_activity_plan = models.ForeignKey(
+        "context.NextActivityPlan",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recovery_slots",
+    )
     sequence_no = models.PositiveSmallIntegerField()
     recommended_at = models.DateTimeField()
     scheduled_at = models.DateTimeField(null=True, blank=True)
     user_changed_at = models.DateTimeField(null=True, blank=True)
     interval_minutes = models.PositiveIntegerField(null=True, blank=True)
     repeat_rule = models.CharField(max_length=120, blank=True)
+    notification_enabled = models.BooleanField(default=True)
     status = models.CharField(max_length=20, choices=SlotStatus.choices, default=SlotStatus.RECOMMENDED)
 
     class Meta:
@@ -144,6 +177,24 @@ class Notification(BaseModel):
     status = models.CharField(
         max_length=20, choices=NotificationStatus.choices, default=NotificationStatus.PENDING
     )
+
+
+class WebPushSubscription(BaseModel):
+    """브라우저 Web Push 발송 대상 구독 정보."""
+
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="web_push_subscriptions")
+    endpoint = models.TextField(unique=True)
+    p256dh = models.CharField(max_length=255)
+    auth = models.CharField(max_length=255)
+    user_agent = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"WebPushSubscription({self.user_id}, active={self.is_active})"
 
 
 # AI 추천/판단에 대한 설명 텍스트 모음

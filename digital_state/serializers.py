@@ -4,11 +4,30 @@ from .models import DayOfWeek, PcUsagePattern
 
 
 class PcUsagePatternSerializer(serializers.ModelSerializer):
-    """조회 응답용."""
+    """조회 응답용. hour(정수)만으로는 화면에서 매번 다시 계산해야 해서 start_time/end_time도 같이 내려준다."""
+
+    start_time = serializers.SerializerMethodField()
+    end_time = serializers.SerializerMethodField()
 
     class Meta:
         model = PcUsagePattern
-        fields = ["day_of_week", "hour", "is_used"]
+        fields = [
+            "id",
+            "day_of_week",
+            "hour",
+            "start_time",
+            "end_time",
+            "is_used",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "start_time", "end_time", "created_at", "updated_at"]
+
+    def get_start_time(self, obj):
+        return f"{obj.hour:02d}:00"
+
+    def get_end_time(self, obj):
+        return f"{obj.hour + 1:02d}:00"
 
 
 class PcUsagePatternItemSerializer(serializers.Serializer):

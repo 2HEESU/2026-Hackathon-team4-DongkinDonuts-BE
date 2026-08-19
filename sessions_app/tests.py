@@ -7,7 +7,7 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User
 from common.constants import CameraPermissionStatus
-from context.models import DailyContext, FocusTimeOption
+from context.models import NextActivityPlan, UserContextSnapshot
 from plans.models import (
     RecoveryPlan,
     RecoverySlot,
@@ -31,21 +31,25 @@ class SessionAbortCompleteApiTest(APITestCase):
             HTTP_X_DEVICE_CODE=str(self.user.id),
         )
 
-        self.daily_context = DailyContext.objects.create(
+        self.context_snapshot = UserContextSnapshot.objects.create(
             user=self.user,
             service_date=date.today(),
-            focus_time_option=FocusTimeOption.SKIPPED,
-            tags_skipped=True,
+        )
+        self.next_activity_plan = NextActivityPlan.objects.create(
+            user=self.user,
+            context_snapshot=self.context_snapshot,
+            service_date=date.today(),
         )
 
         self.recovery_plan = RecoveryPlan.objects.create(
             user=self.user,
-            daily_context=self.daily_context,
             plan_date=date.today(),
         )
 
         self.recovery_slot = RecoverySlot.objects.create(
             recovery_plan=self.recovery_plan,
+            context_snapshot=self.context_snapshot,
+            next_activity_plan=self.next_activity_plan,
             sequence_no=1,
             recommended_at=timezone.now(),
             scheduled_at=timezone.now(),

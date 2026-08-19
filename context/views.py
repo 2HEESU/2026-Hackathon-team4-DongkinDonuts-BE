@@ -2,66 +2,143 @@ from rest_framework import generics, status
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from common.mixins import EnvelopeMixin
 
-from .models import DailyContext
-from .serializers import DailyContextCreateSerializer, DailyContextSerializer
+from .models import NextActivityPlan, UserContextSnapshot
+from .serializers import (
+    NextActivityPlanCreateSerializer,
+    NextActivityPlanSerializer,
+    StateFrequencyQuerySerializer,
+    UserContextSnapshotCreateSerializer,
+    UserContextSnapshotSerializer,
+)
+from .services import get_state_frequency
 from .utils import today_for_user
 
 
-class DailyContextTodayView(EnvelopeMixin, generics.RetrieveAPIView):
-    """GET /context/daily-contexts/today/ — 오늘 등록된 체크인 중 최신 1건 조회."""
+class UserContextSnapshotTodayView(EnvelopeMixin, generics.RetrieveAPIView):
+    """GET /context/context-snapshots/today/ — 오늘 등록된 상태 스냅샷 중 최신 1건 조회."""
 
-    serializer_class = DailyContextSerializer
+    serializer_class = UserContextSnapshotSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ["get", "head", "options"]
 
     def get_object(self):
         today = today_for_user(self.request.user)
         obj = (
-            DailyContext.objects.filter(user=self.request.user, service_date=today)
+            UserContextSnapshot.objects.filter(user=self.request.user, service_date=today)
             .order_by("-created_at")
             .first()
         )
         if obj is None:
-            raise NotFound("오늘 등록된 체크인이 없습니다.")
+            raise NotFound("오늘 등록된 상태 스냅샷이 없습니다.")
         return obj
 
 
-class DailyContextCreateView(EnvelopeMixin, generics.CreateAPIView):
-    """POST /context/daily-contexts/ — 오늘의 상황 체크인 생성."""
+class UserContextSnapshotCreateView(EnvelopeMixin, generics.CreateAPIView):
+    """POST /context/context-snapshots/ — 지금 내 상태 스냅샷 생성."""
 
-    serializer_class = DailyContextCreateSerializer
+    serializer_class = UserContextSnapshotCreateSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ["post", "options"]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        daily_context = serializer.save()
-        # 응답은 입력용 시리얼라이저가 아니라 조회용 시리얼라이저로 다시 만든다 —
-        # activity_tags/state_options를 연결 테이블에서 다시 읽어와 온전한 모양으로 보여주기 위해.
-        output = DailyContextSerializer(daily_context)
+        snapshot = serializer.save()
+        output = UserContextSnapshotSerializer(snapshot)
         headers = self.get_success_headers(output.data)
         return Response(output.data, status=status.HTTP_201_CREATED, headers=headers)
 
 
-class DailyContextUpdateView(EnvelopeMixin, generics.UpdateAPIView):
-    """PATCH /context/daily-contexts/{id}/ — 체크인 일부 수정. 본인 것만 수정 가능."""
+class UserContextSnapshotUpdateView(EnvelopeMixin, generics.UpdateAPIView):
+    """PATCH /context/context-snapshots/{id}/ — 상태 스냅샷 일부 수정. 본인 것만 수정 가능."""
 
-    serializer_class = DailyContextCreateSerializer
+    serializer_class = UserContextSnapshotCreateSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ["patch", "options"]
 
     def get_queryset(self):
-        return DailyContext.objects.filter(user=self.request.user)
+        return UserContextSnapshot.objects.filter(user=self.request.user)
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
-        daily_context = serializer.save()
-        output = DailyContextSerializer(daily_context)
+        snapshot = serializer.save()
+        output = UserContextSnapshotSerializer(snapshot)
         return Response(output.data)
+
+
+class NextActivityPlanTodayView(EnvelopeMixin, generics.RetrieveAPIView):
+    """GET /context/next-activity-plans/today/ — 오늘 등록된 이후 활동 계획 중 최신 1건 조회."""
+
+    serializer_class = NextActivityPlanSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "head", "options"]
+
+    def get_object(self):
+        today = today_for_user(self.request.user)
+        obj = (
+            NextActivityPlan.objects.filter(user=self.request.user, service_date=today)
+            .order_by("-created_at")
+            .first()
+        )
+        if obj is None:
+            raise NotFound("오늘 등록된 이후 활동 계획이 없습니다.")
+        return obj
+
+
+class NextActivityPlanCreateView(EnvelopeMixin, generics.CreateAPIView):
+    """POST /context/next-activity-plans/ — 앞으로의 활동 종류와 활동 시간 기록 생성."""
+
+    serializer_class = NextActivityPlanCreateSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["post", "options"]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        plan = serializer.save()
+        output = NextActivityPlanSerializer(plan)
+        headers = self.get_success_headers(output.data)
+        return Response(output.data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+class NextActivityPlanUpdateView(EnvelopeMixin, generics.UpdateAPIView):
+    """PATCH /context/next-activity-plans/{id}/ — 이후 활동 계획 일부 수정. 본인 것만 수정 가능."""
+
+    serializer_class = NextActivityPlanCreateSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["patch", "options"]
+
+    def get_queryset(self):
+        return NextActivityPlan.objects.filter(user=self.request.user)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        plan = serializer.save()
+        output = NextActivityPlanSerializer(plan)
+        return Response(output.data)
+
+
+class StateFrequencyView(EnvelopeMixin, APIView):
+    """
+    GET /context/state-frequency/?days=30 — 최근 N일간 상태(StateOption) 선택 빈도 집계.
+    plans가 AI 추천 시 "이 사용자가 자주 겪는 상태"에 가중치를 주는 근거로 쓴다.
+    """
+
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "options"]
+
+    def get(self, request, *args, **kwargs):
+        query_serializer = StateFrequencyQuerySerializer(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        days = query_serializer.validated_data["days"]
+        return Response(get_state_frequency(request.user, days=days))
