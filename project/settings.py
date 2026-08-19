@@ -155,6 +155,11 @@ CORS_ALLOWED_ORIGINS = env.list(
     default=[
         "https://dgu14thlikelion.shop",
         "https://www.dgu14thlikelion.shop",
+        # 프론트 팀원들이 로컬 vite 개발 서버(DEBUG=False인 이 배포 API 대상으로)에서
+        # 바로 붙여서 테스트할 수 있게 흔한 vite 기본 포트 몇 개를 미리 허용해둔다.
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
     ],
 )
 # django-cors-headers 기본 허용 헤더 목록엔 우리 커스텀 인증 헤더(X-Device-Code)가
