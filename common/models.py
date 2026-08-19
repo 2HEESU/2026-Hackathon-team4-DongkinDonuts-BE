@@ -31,18 +31,30 @@ class BaseModel(UUIDModel, TimeStampedModel):
         abstract = True
 
 
-# 온보딩 활동 태그(#코딩, #과제 등) 사전 정의 목록
+# 온보딩 활동 태그(#코딩, #과제 등) 사전 정의 목록 + 사용자 직접입력 태그
 class ActivityTag(models.Model):
     """
     ERD: activity_tags
     온보딩에서 고르는 활동 태그(#코딩, #과제 등) 사전 정의 목록. 다른 앱(context)에서
     참조하므로 순환 참조를 피하려고 공용 앱(common)에 둔다.
+
+    디자인 목업 확인 결과 "+ 직접입력"으로 사용자가 새 태그를 추가할 수 있어야 함.
+    created_by가 null이면 기본 제공 태그(전체 공개), 값이 있으면 그 사용자가 직접
+    입력해서 만든 개인 태그(본인에게만 노출)로 구분한다.
     """
 
     code = models.CharField(max_length=50, primary_key=True)
     name = models.CharField(max_length=50)
     category = models.CharField(max_length=50, blank=True)
     is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        "accounts.User",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="custom_activity_tags",
+        help_text="null이면 기본 제공 태그(전체 공개), 값이 있으면 그 사용자만 보이는 직접입력 태그",
+    )
 
     def __str__(self):
         return self.name

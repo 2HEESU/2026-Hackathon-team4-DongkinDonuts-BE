@@ -10,22 +10,20 @@ class PcUsagePatternApiTests(APITestCase):
 
     def test_bulk_replace_and_analysis(self):
         response = self.client.put(
-            "/api/v1/digital-state/pc-usage-patterns/",
-            {
-                "patterns": [
-                    {"day_of_week": "MON", "hour": 9, "is_used": True},
-                    {"day_of_week": "MON", "hour": 10, "is_used": True},
-                    {"day_of_week": "TUE", "hour": 9, "is_used": True},
-                    {"day_of_week": "WED", "hour": 15, "is_used": False},
-                ]
-            },
+            "/api/v1/digital-state/patterns/bulk/",
+            [
+                {"day_of_week": "MON", "hour": 9, "is_used": True},
+                {"day_of_week": "MON", "hour": 10, "is_used": True},
+                {"day_of_week": "TUE", "hour": 9, "is_used": True},
+                {"day_of_week": "WED", "hour": 15, "is_used": False},
+            ],
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["data"]), 4)
 
-        analysis_response = self.client.get("/api/v1/digital-state/pc-usage-patterns/analysis/")
+        analysis_response = self.client.get("/api/v1/digital-state/patterns/analysis/")
 
         self.assertEqual(analysis_response.status_code, status.HTTP_200_OK)
         analysis = analysis_response.data["data"]
