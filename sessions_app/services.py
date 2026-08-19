@@ -172,7 +172,6 @@ def reset_session(*, user, session_id):
         session.ended_at = None
         session.duration_sec = None
         session.accuracy = None
-        session.streak_count = 0
         session.metrics = None
         session.reset_count += 1
         session.status = SessionStatus.IN_PROGRESS
@@ -196,3 +195,176 @@ def reset_session(*, user, session_id):
         )
 
         return session
+
+def abort_session(*, user, session_id):
+    with transaction.atomic():
+        session = _get_session_for_update(
+            user=user,
+            session_id=session_id,
+        )
+
+        if session.status != SessionStatus.IN_PROGRESS:
+            raise Conflict(
+                "진행 중인 세션만 중단할 수 있습니다.",
+            )
+
+        routine_instance = RoutineInstance.objects.select_for_update().get(
+            pk=session.routine_instance_id,
+        )
+
+        # 슬롯을 함께 잠그지만 상태는 STARTED로 유지
+        RecoverySlot.objects.select_for_update().get(
+            pk=session.recovery_slot_id,
+        )
+
+        ended_at = timezone.now()
+
+        session.ended_at = ended_at
+        session.duration_sec = _calculate_duration_sec(
+            started_at=session.started_at,
+            ended_at=ended_at,
+        )
+        session.status = SessionStatus.ABORTED
+        session.save(
+            update_fields=[
+                "ended_at",
+                "duration_sec",
+                "status",
+                "updated_at",
+            ]
+        )
+
+        # 중단된 현재 루틴만 다시 수행 가능하게 변경
+        routine_instance.status = RoutineInstanceStatus.AVAILABLE
+        routine_instance.completed_at = None
+        routine_instance.save(
+            update_fields=[
+                "status",
+                "completed_at",
+                "updated_at",
+            ]
+        )
+
+        # 다음 RoutineInstance는 수정하지 않아 LOCKED 상태가 유지
+        # RecoverySlot도 수정하지 않으므로 STARTED 상태가 유지
+        return session
+
+def complete_session(
+    *,
+    user,
+    session_id,
+    accuracy,
+    metrics,
+):
+    with transaction.atomic():
+        session = _get_session_for_update(
+            user=user,
+            session_id=session_id,
+        )
+
+        if session.status != SessionStatus.IN_PROGRESS:
+            raise Conflict(
+                "진행 중인 세션만 완료할 수 있습니다.",
+            )
+
+        routine_instance = RoutineInstance.objects.select_for_update().get(
+            pk=session.routine_instance_id,
+        )
+
+        recovery_slot = RecoverySlot.objects.select_for_update().get(
+            pk=session.recovery_slot_id,
+        )
+
+        ended_at = timezone.now()
+
+        session.ended_at = ended_at
+        session.duration_sec = _calculate_duration_sec(
+            started_at=session.started_at,
+            ended_at=ended_at,
+        )
+        session.accuracy = accuracy
+        session.metrics = metrics
+        session.status = SessionStatus.COMPLETED
+        session.save(
+            update_fields=[
+                "ended_at",
+                "duration_sec",
+                "accuracy",
+                "metrics",
+                "status",
+                "updated_at",
+            ]
+        )
+
+        routine_instance.status = RoutineInstanceStatus.COMPLETED
+        routine_instance.completed_at = ended_at
+        routine_instance.save(
+            update_fields=[
+                "status",
+                "completed_at",
+                "updated_at",
+            ]
+        )
+
+        next_routine_instance = (
+            RoutineInstance.objects.select_for_update()
+            .filter(
+                recovery_slot=recovery_slot,
+                sequence_no__gt=routine_instance.sequence_no,
+            )
+            .order_by("sequence_no")
+            .first()
+        )
+
+        if next_routine_instance is not None:
+            next_routine_instance.status = (
+                RoutineInstanceStatus.AVAILABLE
+            )
+            next_routine_instance.locked_until_previous_done = False
+            next_routine_instance.save(
+                update_fields=[
+                    "status",
+                    "locked_until_previous_done",
+                    "updated_at",
+                ]
+            )
+
+        # 다음 루틴이 있으니 RecoverySlot은 STARTED를 유지
+        else:
+            recovery_slot.status = SlotStatus.COMPLETED
+            recovery_slot.save(
+                update_fields=[
+                    "status",
+                    "updated_at",
+                ]
+            )
+
+        # API 응답에는 next_routine_instance를 임의로 추가하지 않음
+        return session
+
+def _get_session_for_update(*, user, session_id):
+    try:
+        return (
+            Session.objects.select_for_update()
+            .select_related(
+                "activity",
+                "routine_instance",
+                "recovery_slot",
+            )
+            .get(
+                pk=session_id,
+                user=user,
+            )
+        )
+    except Session.DoesNotExist as exc:
+        raise NotFound(
+            "세션을 찾을 수 없습니다.",
+        ) from exc
+
+def _calculate_duration_sec(*, started_at, ended_at):
+    duration = int(
+        (ended_at - started_at).total_seconds()
+    )
+
+    # 서버 시각 오차 등 음수가 저장되지 않도록 방어
+    return max(0, duration)

@@ -7,10 +7,16 @@ from common.mixins import EnvelopeMixin
 
 from .models import Session, SessionStatus
 from .serializers import (
+    SessionCompleteSerializer,
     SessionSerializer,
     SessionStartSerializer,
 )
-from .services import reset_session, start_session
+from .services import (
+    abort_session,
+    complete_session,
+    reset_session,
+    start_session,
+)
 
 # Create your views here.
 class ActiveSessionView(EnvelopeMixin, APIView):
@@ -111,6 +117,57 @@ class SessionResetView(EnvelopeMixin, APIView):
         session = reset_session(
             user=request.user,
             session_id=id,
+        )
+
+        return Response(
+            SessionSerializer(session).data,
+            status=status.HTTP_200_OK,
+        )
+
+class SessionAbortView(EnvelopeMixin, APIView):
+    """
+    PATCH /api/v1/sessions/{id}/abort/
+    현재 진행 중인 세션을 중단
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, id):
+        session = abort_session(
+            user=request.user,
+            session_id=id,
+        )
+
+        return Response(
+            SessionSerializer(session).data,
+            status=status.HTTP_200_OK,
+        )
+
+class SessionCompleteView(EnvelopeMixin, APIView):
+    """
+    PATCH /api/v1/sessions/{id}/complete/
+    현재 진행 중인 세션을 완료
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, id):
+        request_serializer = SessionCompleteSerializer(
+            data=request.data,
+        )
+        request_serializer.is_valid(
+            raise_exception=True,
+        )
+
+        session = complete_session(
+            user=request.user,
+            session_id=id,
+            accuracy=request_serializer.validated_data[
+                "accuracy"
+            ],
+            metrics=request_serializer.validated_data.get(
+                "metrics"
+            ),
         )
 
         return Response(

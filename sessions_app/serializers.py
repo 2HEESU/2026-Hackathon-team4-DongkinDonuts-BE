@@ -33,7 +33,6 @@ class SessionSerializer(serializers.ModelSerializer):
             "ended_at",
             "duration_sec",
             "accuracy",
-            "streak_count",
             "metrics",
             "status",
             "camera_permission_status",
@@ -47,4 +46,14 @@ class SessionStartSerializer(serializers.Serializer):
     routine_instance_id = serializers.UUIDField()
     camera_permission_status = serializers.ChoiceField(
         choices=CameraPermissionStatus.choices,
+    )
+
+class SessionCompleteSerializer(serializers.Serializer):
+    accuracy = serializers.IntegerField(
+        min_value=0,
+        max_value=100,
+    )
+    metrics = serializers.JSONField(
+        required=False,
+        allow_null=True,
     )
