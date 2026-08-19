@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from common.models import ActivityTag, StateOption
+
 from .models import (
     NextActivityPlan,
     NextActivityPlanActivityTag,
@@ -7,6 +9,21 @@ from .models import (
     UserContextSnapshotState,
 )
 from .utils import today_for_user
+
+
+def _get_or_create_activity_tags(codes, user):
+    """
+    activity_tags로 들어온 문자열 목록을 ActivityTag로 매핑한다. 이미 있는 코드(기본
+    제공 태그, 또는 이 사용자가 예전에 만든 커스텀 태그)면 그대로 쓰고, 없으면 "+
+    직접입력"으로 새로 만든 것으로 보고 created_by=user로 새 ActivityTag를 만든다.
+    """
+    tags = []
+    for code in codes:
+        tag, _ = ActivityTag.objects.get_or_create(
+            code=code, defaults={"name": code, "created_by": user}
+        )
+        tags.append(tag)
+    return tags
 
 
 class UserContextSnapshotSerializer(serializers.ModelSerializer):
@@ -33,13 +50,26 @@ class UserContextSnapshotSerializer(serializers.ModelSerializer):
 class UserContextSnapshotCreateSerializer(serializers.Serializer):
     """
     UserContextSnapshot 생성/수정 입력용.
-
-    state_options가 빈 리스트면 사용자가 상태 선택을 하지 않은 것으로 본다. 별도 skipped
-    플래그를 저장하지 않아도 null/empty 값만으로 입력 여부를 판단할 수 있다.
     """
 
     note = serializers.CharField(required=False, allow_blank=True, default="")
-    state_options = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    # 이슈 #13: state는 더 이상 건너뛸 수 없음 — required=True(기본값) + allow_empty=False라서
+    # POST에선 반드시 보내야 하고(partial 아니므로), PATCH에선 아예 안 보내면 건드리지 않지만
+    # 보낼 거면 최소 1개는 있어야 한다(빈 리스트로 지우는 것 금지).
+    state_options = serializers.ListField(child=serializers.CharField(), allow_empty=False)
+
+    def validate_state_options(self, value):
+        # state는 activity_tags와 달리 고정 카탈로그라 자동 생성하지 않는다 — 존재하지 않는
+        # 코드가 오면 DB단 FK 에러(500)로 죽기 전에 여기서 깔끔한 400으로 막는다.
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("중복된 상태 옵션이 있습니다.")
+        existing = set(
+            StateOption.objects.filter(code__in=value, is_active=True).values_list("code", flat=True)
+        )
+        missing = [code for code in value if code not in existing]
+        if missing:
+            raise serializers.ValidationError(f"존재하지 않는 상태 옵션입니다: {', '.join(missing)}")
+        return value
 
     def create(self, validated_data):
         state_codes = validated_data.pop("state_options")
@@ -115,6 +145,13 @@ class NextActivityPlanCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("본인의 상태 스냅샷만 연결할 수 있습니다.")
         return value
 
+    def validate_activity_tags(self, value):
+        # 활동 태그는 없는 코드가 오면 커스텀 태그로 자동 생성되므로(get_or_create),
+        # 여기서는 같은 값이 중복으로 들어와서 DB의 UniqueConstraint를 건드리는 것만 막는다.
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("중복된 활동 태그가 있습니다.")
+        return value
+
     def create(self, validated_data):
         activity_tag_codes = validated_data.pop("activity_tags")
         user = self.context["request"].user
@@ -124,9 +161,10 @@ class NextActivityPlanCreateSerializer(serializers.Serializer):
             service_date=today_for_user(user),
             **validated_data,
         )
+        activity_tags = _get_or_create_activity_tags(activity_tag_codes, user)
         NextActivityPlanActivityTag.objects.bulk_create(
-            NextActivityPlanActivityTag(next_activity_plan=plan, activity_tag_id=code)
-            for code in activity_tag_codes
+            NextActivityPlanActivityTag(next_activity_plan=plan, activity_tag=tag)
+            for tag in activity_tags
         )
         return plan
 
@@ -139,8 +177,9 @@ class NextActivityPlanCreateSerializer(serializers.Serializer):
 
         if activity_tag_codes is not None:
             instance.activity_tag_links.all().delete()
+            activity_tags = _get_or_create_activity_tags(activity_tag_codes, instance.user)
             NextActivityPlanActivityTag.objects.bulk_create(
-                NextActivityPlanActivityTag(next_activity_plan=instance, activity_tag_id=code)
-                for code in activity_tag_codes
+                NextActivityPlanActivityTag(next_activity_plan=instance, activity_tag=tag)
+                for tag in activity_tags
             )
         return instance
