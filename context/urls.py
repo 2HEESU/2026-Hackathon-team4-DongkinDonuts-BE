@@ -4,6 +4,7 @@ from .views import (
     NextActivityPlanCreateView,
     NextActivityPlanTodayView,
     NextActivityPlanUpdateView,
+    StateFrequencyView,
     UserContextSnapshotCreateView,
     UserContextSnapshotTodayView,
     UserContextSnapshotUpdateView,
@@ -18,4 +19,5 @@ urlpatterns = [
     path("next-activity-plans/today/", NextActivityPlanTodayView.as_view(), name="next-activity-plan-today"),
     path("next-activity-plans/", NextActivityPlanCreateView.as_view(), name="next-activity-plan-create"),
     path("next-activity-plans/<uuid:pk>/", NextActivityPlanUpdateView.as_view(), name="next-activity-plan-update"),
+    path("state-frequency/", StateFrequencyView.as_view(), name="state-frequency"),
 ]

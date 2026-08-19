@@ -8,7 +8,16 @@ from .models import (
     UserContextSnapshot,
     UserContextSnapshotState,
 )
+from .services import DEFAULT_STATE_FREQUENCY_DAYS
 from .utils import today_for_user
+
+
+class StateFrequencyQuerySerializer(serializers.Serializer):
+    """GET /context/state-frequency/ 쿼리 파라미터(?days=) 검증용."""
+
+    days = serializers.IntegerField(
+        required=False, default=DEFAULT_STATE_FREQUENCY_DAYS, min_value=1, max_value=365
+    )
 
 
 def _get_or_create_activity_tags(codes, user):
