@@ -4,6 +4,8 @@ from .models import DayOfWeek, PcUsagePattern
 
 
 class PcUsagePatternSerializer(serializers.ModelSerializer):
+    """조회 응답용. hour(정수)만으로는 화면에서 매번 다시 계산해야 해서 start_time/end_time도 같이 내려준다."""
+
     start_time = serializers.SerializerMethodField()
     end_time = serializers.SerializerMethodField()
 
@@ -28,20 +30,10 @@ class PcUsagePatternSerializer(serializers.ModelSerializer):
         return f"{obj.hour + 1:02d}:00"
 
 
-class PcUsagePatternInputSerializer(serializers.Serializer):
+class PcUsagePatternItemSerializer(serializers.Serializer):
+    """PUT bulk 요청 리스트의 원소 하나를 검증하는 용도(ModelSerializer 아님 — DB에 바로 안 쓰고
+    view에서 통째로 delete+bulk_create 하기 때문에 여기선 검증만 담당)."""
+
     day_of_week = serializers.ChoiceField(choices=DayOfWeek.choices)
     hour = serializers.IntegerField(min_value=0, max_value=23)
-    is_used = serializers.BooleanField(default=True)
-
-
-class PcUsagePatternBulkReplaceSerializer(serializers.Serializer):
-    patterns = PcUsagePatternInputSerializer(many=True)
-
-    def validate_patterns(self, value):
-        seen = set()
-        for item in value:
-            key = (item["day_of_week"], item["hour"])
-            if key in seen:
-                raise serializers.ValidationError("같은 요일/시간 조합이 중복되었습니다.")
-            seen.add(key)
-        return value
+    is_used = serializers.BooleanField()

@@ -1,13 +1,11 @@
 from django.urls import path
 
-from .views import PcUsagePatternAnalysisView, PcUsagePatternListReplaceView
+from .views import PcUsagePatternAnalysisView, PcUsagePatternBulkUpdateView, PcUsagePatternListView
 
 app_name = "digital_state"
+
 urlpatterns = [
-    path("pc-usage-patterns/", PcUsagePatternListReplaceView.as_view(), name="pc-usage-pattern-list-replace"),
-    path(
-        "pc-usage-patterns/analysis/",
-        PcUsagePatternAnalysisView.as_view(),
-        name="pc-usage-pattern-analysis",
-    ),
+    path("patterns/bulk/", PcUsagePatternBulkUpdateView.as_view(), name="pattern-bulk-update"),
+    path("patterns/", PcUsagePatternListView.as_view(), name="pattern-list"),
+    path("patterns/analysis/", PcUsagePatternAnalysisView.as_view(), name="pattern-analysis"),
 ]
