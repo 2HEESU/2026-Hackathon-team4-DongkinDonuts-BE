@@ -144,6 +144,34 @@ def recovery_time_policy_for_context(context_snapshot=None):
     }
 
 
+def _demo_mode_seconds_for_context(context_snapshot):
+    """DEMO_MODE용 초 단위 간격. 선택된 상태 중 가장 짧은 걸 우선한다."""
+
+    state_codes = []
+    if context_snapshot is not None:
+        state_codes = list(
+            context_snapshot.state_links.values_list("state_id", flat=True)
+        )
+    if not state_codes:
+        return 15
+    return min(DEMO_MODE_SECONDS_BY_STATE.get(code, 15) for code in state_codes)
+
+
+def recovery_interval_timedelta_for_context(context_snapshot=None):
+    """
+    회복 인터벌을 timedelta로 계산한다.
+
+    settings.DEMO_MODE=True일 때만 RECOVERY_INTERVAL_MINUTES_BY_STATE(분) 대신
+    DEMO_MODE_SECONDS_BY_STATE(초)를 쓴다 — 현장 시연/촬영 때 몇 분씩 안 기다리고
+    알림 반복 흐름을 바로 보여주기 위함. 레포 기본값(DEMO_MODE=False)에선 항상
+    기존 분 단위 정책 그대로라 제출 코드/AI 채점에는 영향이 없다.
+    """
+
+    if getattr(settings, "DEMO_MODE", False):
+        return timedelta(seconds=_demo_mode_seconds_for_context(context_snapshot))
+    return timedelta(minutes=recovery_interval_minutes_for_context(context_snapshot))
+
+
 def recovery_interval_minutes_for_context(context_snapshot=None):
     return recovery_time_policy_for_context(context_snapshot)["interval_minutes"]
 
@@ -371,6 +399,19 @@ def _minute_floor(value):
     return value.replace(second=0, microsecond=0)
 
 
+def _schedule_base_time(base_time):
+    """
+    회복 슬롯 시각 계산의 기준 시각. 평소엔 분 단위로 내림한다(초 단위 인터벌이
+    없어서 상관 없었음). DEMO_MODE=True면 10~30초짜리 인터벌을 쓰기 때문에
+    분 단위로 내리면 첫 슬롯이 이미 지난 시각이 될 수 있어— 마이크로초만 버린다.
+    """
+
+    base_time = base_time or timezone.now()
+    if getattr(settings, "DEMO_MODE", False):
+        return base_time.replace(microsecond=0)
+    return _minute_floor(base_time)
+
+
 def recommend_next_reset_time(next_activity_plan=None, base_time=None, context_snapshot=None):
     """
     다음 회복 슬롯 시각을 계산하는 정책 기반 기본값.
@@ -379,10 +420,9 @@ def recommend_next_reset_time(next_activity_plan=None, base_time=None, context_s
     지정하는 수동/예약 흐름은 view가 recommended_at/recommended_times를 명시 전달한다.
     """
 
-    base_time = _minute_floor(base_time or timezone.now())
+    base_time = _schedule_base_time(base_time)
     policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
-    minutes = recovery_interval_minutes_for_context(policy_context)
-    return base_time + timedelta(minutes=minutes)
+    return base_time + recovery_interval_timedelta_for_context(policy_context)
 
 
 def _datetime_at_hour(date_value, hour):
@@ -642,12 +682,25 @@ def _previous_session_frequency_times(*, user, base_time, max_slots):
     return sorted(times)
 
 
+def _recommended_slot_dedupe_key(value):
+    """
+    거의 같은 시각 후보들을 하나로 합칠 때 쓰는 키. 평소엔 분 단위로 합친다
+    (인터벌이 항상 분 단위라 문제 없었음). DEMO_MODE=True면 인터벌 자체가
+    10~30초라 분 단위로 합치면 한 분 안의 후보 여러 개가 전부 하나로
+    뭉개져서(=슬롯이 하나만 남아서) 시연이 안 된다 — 초 단위로만 합친다.
+    """
+
+    if getattr(settings, "DEMO_MODE", False):
+        return value.replace(microsecond=0)
+    return _minute_floor(value)
+
+
 def _merge_recommended_slot(slots_by_time, *, recommended_at, notification_basis, reason, data_sources):
-    key = _minute_floor(recommended_at)
+    key = _recommended_slot_dedupe_key(recommended_at)
     existing = slots_by_time.get(key)
     if existing is None:
         slots_by_time[key] = {
-            "recommended_at": key,
+            "recommended_at": recommended_at.replace(microsecond=0),
             "notification_basis": notification_basis,
             "reason": reason,
             "data_sources": list(data_sources),
@@ -712,10 +765,9 @@ def build_policy_recommended_slots(
     False인 다른 호출부(예: 이후 활동 다시 설정)는 기존 동작 그대로다.
     """
 
-    base_time = _minute_floor(base_time or timezone.now())
+    base_time = _schedule_base_time(base_time)
     policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
-    interval_minutes = recovery_interval_minutes_for_context(policy_context)
-    interval = timedelta(minutes=interval_minutes)
+    interval = recovery_interval_timedelta_for_context(policy_context)
     slots_by_time = {}
 
     pc_break_entries = (
