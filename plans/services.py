@@ -1,3 +1,4 @@
+import itertools
 from datetime import datetime, time, timedelta
 
 from django.db import transaction
@@ -384,6 +385,83 @@ def _today_pc_usage_windows(user):
     return windows
 
 
+def _pc_usage_window_interval_times(user, base_time, interval, windows=None):
+    """
+    (이력 부족 시 쓰는 기본값) 오늘 PC 사용 패턴의 연속된 시간 블록(윈도우)마다,
+    그 블록 안에서 상태 기반 interval 간격으로 균일하게 반복되는 알림 후보
+    시각을 만든다 — 긴 블록일수록 자연히 더 자주, interval보다 짧은 블록은
+    중간 지점 하나로 최소 1개는 보장한다. 이미 지난 시각은 건너뛴다.
+
+    블록별로 만든 후보를 그대로 이어붙이지 않고 라운드로빈으로 섞는다 — 안 그러면
+    긴 블록 하나가 상한선을 혼자 다 써버려서 뒤에 있는 다른 블록엔 알림이 하나도
+    안 배정되는 문제가 생긴다.
+    """
+    if windows is None:
+        windows = _today_pc_usage_windows(user)
+
+    per_window_times = []
+    for start, end in windows:
+        window_times = []
+        candidate = _minute_floor(start + interval)
+        while candidate <= end:
+            window_times.append(candidate)
+            candidate += interval
+
+        if not window_times:
+            window_times = [_minute_floor(start + (end - start) / 2)]
+
+        window_times = [t for t in window_times if t > base_time]
+        if window_times:
+            per_window_times.append(window_times)
+
+    interleaved = []
+    for group in itertools.zip_longest(*per_window_times):
+        interleaved.extend(t for t in group if t is not None)
+    return interleaved
+
+
+def _digital_state_break_times(user, base_time, interval, max_slots):
+    """
+    My Digital State 흐름의 알림 후보 시각을 만든다. 단순히 상태별 interval을
+    기계적으로 반복하면 상태 선택 모달이랑 다를 게 없어서(개인화가 아님), 실제
+    과거 세션 기록(최대 지난 30일)을 분석해서 사용자가 실제로 자주 활동했던
+    시간대(빈도 클러스터, 간격이 균일할 필요 없음)를 우선 쓴다.
+
+    이력이 부족해서 못 채우는 PC 사용 블록만, 그 블록 안에서 상태 interval로
+    반복하는 기본값(_pc_usage_window_interval_times)으로 보충한다 — 완전히
+    새 사용자라 이력이 하나도 없어도 최소한의 알림은 보장하기 위함.
+
+    반환값은 (recommended_at, source) 튜플 리스트 — source는 "history"(과거
+    기록 기반) 또는 "bootstrap"(이력 없어서 기본값으로 채운 것)이고, 호출부가
+    이걸로 인사이트 문구를 다르게 붙인다.
+    """
+    frequency_times = _previous_session_frequency_times(
+        user=user, base_time=base_time, max_slots=max_slots,
+    )
+    entries = [(recommended_at, "history") for recommended_at in frequency_times]
+
+    remaining_budget = max_slots - len(entries)
+    if remaining_budget <= 0:
+        return entries
+
+    windows = _today_pc_usage_windows(user)
+    covered_indexes = set()
+    for recommended_at in frequency_times:
+        for index, (start, end) in enumerate(windows):
+            if start <= recommended_at < end:
+                covered_indexes.add(index)
+                break
+
+    uncovered_windows = [
+        window for index, window in enumerate(windows) if index not in covered_indexes
+    ]
+    bootstrap_times = _pc_usage_window_interval_times(
+        user, base_time, interval, windows=uncovered_windows
+    )
+    entries.extend((recommended_at, "bootstrap") for recommended_at in bootstrap_times[:remaining_budget])
+    return entries
+
+
 def _activity_window_end(next_activity_plan, base_time):
     expected_minutes = getattr(next_activity_plan, "expected_activity_minutes", None)
     if not expected_minutes:
@@ -587,6 +665,7 @@ def build_policy_recommended_slots(
     base_time=None,
     max_slots=MAX_POLICY_RECOMMENDED_TIMES,
     include_frequency_slots=True,
+    prioritize_pc_usage_windows=False,
 ):
     """
     상태 기반 스냅샷 슬롯과(옵션으로) 빈도 기반 슬롯을 함께 계산한다.
@@ -595,6 +674,13 @@ def build_policy_recommended_slots(
     아예 참고하지 않고 상태 스냅샷+다음 활동 시간만으로 슬롯을 만든다 — 상태
     선택 모달("회복 루틴 시작하기" 등)처럼 My Digital State와 완전히 무관해야
     하는 흐름에서 쓴다.
+
+    prioritize_pc_usage_windows=True(My Digital State에서 PC 사용 패턴을 입력하고
+    만든 흐름에서만 킴)면, 오늘 PC 사용 패턴이 있는 한 하루 전체 인터벌 반복
+    대신 실제 과거 세션 기록을 분석해서 사용자가 자주 활동했던 시간대(빈도
+    클러스터, 간격이 균일할 필요 없음)를 우선 배치하고, 이력이 부족한 블록만
+    상태 interval 반복으로 보충한다(_digital_state_break_times). 이 플래그가
+    False인 다른 호출부(예: 이후 활동 다시 설정)는 기존 동작 그대로다.
     """
 
     base_time = _minute_floor(base_time or timezone.now())
@@ -603,20 +689,42 @@ def build_policy_recommended_slots(
     interval = timedelta(minutes=interval_minutes)
     slots_by_time = {}
 
-    activity_end = _activity_window_end(next_activity_plan, base_time)
-    for recommended_at in _activity_interval_times(
-        base_time=base_time,
-        end_time=activity_end,
-        interval=interval,
-        max_slots=max_slots,
-    ):
-        _merge_recommended_slot(
-            slots_by_time,
-            recommended_at=recommended_at,
-            notification_basis=SlotNotificationBasis.SNAPSHOT,
-            reason="이후 활동 시간 동안 현재 상태에 맞춘 회복 간격으로 배치했습니다.",
-            data_sources=["context_snapshot", "next_activity_plan", "time_policy"],
-        )
+    pc_break_entries = (
+        _digital_state_break_times(user, base_time, interval, max_slots)
+        if prioritize_pc_usage_windows and include_frequency_slots
+        else []
+    )
+
+    if pc_break_entries:
+        for recommended_at, source in pc_break_entries[:max_slots]:
+            if source == "history":
+                reason = "과거 실제 활동 기록을 보면 이 시간대에 자주 활동하셔서 배치했습니다."
+                data_sources = ["pc_usage_patterns", "previous_sessions", "time_policy"]
+            else:
+                reason = "PC 사용 구간 안에서 짧은 휴식을 권합니다."
+                data_sources = ["pc_usage_patterns", "time_policy"]
+            _merge_recommended_slot(
+                slots_by_time,
+                recommended_at=recommended_at,
+                notification_basis=SlotNotificationBasis.FREQUENCY,
+                reason=reason,
+                data_sources=data_sources,
+            )
+    else:
+        activity_end = _activity_window_end(next_activity_plan, base_time)
+        for recommended_at in _activity_interval_times(
+            base_time=base_time,
+            end_time=activity_end,
+            interval=interval,
+            max_slots=max_slots,
+        ):
+            _merge_recommended_slot(
+                slots_by_time,
+                recommended_at=recommended_at,
+                notification_basis=SlotNotificationBasis.SNAPSHOT,
+                reason="이후 활동 시간 동안 현재 상태에 맞춘 회복 간격으로 배치했습니다.",
+                data_sources=["context_snapshot", "next_activity_plan", "time_policy"],
+            )
 
     remaining_slots = max(0, min(MAX_PREVIOUS_SESSION_FREQUENCY_TIMES, max_slots - len(slots_by_time)))
     if include_frequency_slots and remaining_slots:
@@ -1110,6 +1218,45 @@ def cleanup_nearby_pattern_notifications_on_entry(*, user, current_time=None, th
     for slot in open_slots:
         slot_time = slot.effective_time
         if slot_time and abs((slot_time - now).total_seconds()) <= threshold.total_seconds():
+            slot.status = SlotStatus.CANCELED
+            slot.save(update_fields=["status", "updated_at"])
+            sync_slot_notification(slot)
+            canceled_slots.append(slot)
+
+    return canceled_slots
+
+
+def cancel_nearest_upcoming_pc_usage_block_notifications(*, user, current_time=None):
+    """
+    [상태 선택 모달로 알림을 직접 설정했을 때의 정리 정책]
+    My Digital State가 오늘 하루치를 미리 예약해두는 이유는 "서비스를 써야
+    한다는 걸 인지 못 하는 순간에도 알려주기 위함"이다. 근데 사용자가 이미
+    스스로 인지하고 서비스에 들어와서 상태 선택 모달로 알림을 새로 설정했다면,
+    지금 시점 이후 가장 가까운(아직 시작 안 한) PC 사용 블록 하나는 굳이
+    중복으로 울릴 필요가 없다고 보고 그 블록의 빈도 기반 알림만 취소한다.
+    더 먼 다른 블록들은 손대지 않는다.
+    """
+    now = current_time or timezone.now()
+
+    upcoming_windows = [
+        window for window in _today_pc_usage_windows(user) if window[0] > now
+    ]
+    if not upcoming_windows:
+        return []
+
+    nearest_start, nearest_end = min(upcoming_windows, key=lambda window: window[0])
+
+    open_slots = RecoverySlot.objects.filter(
+        recovery_plan__user=user,
+        recovery_plan__plan_date=today_for_user(user),
+        status__in=OPEN_SLOT_STATUSES,
+        notification_basis=SlotNotificationBasis.FREQUENCY,
+    ).select_related("recovery_plan")
+
+    canceled_slots = []
+    for slot in open_slots:
+        slot_time = slot.effective_time
+        if slot_time and nearest_start <= slot_time < nearest_end:
             slot.status = SlotStatus.CANCELED
             slot.save(update_fields=["status", "updated_at"])
             sync_slot_notification(slot)

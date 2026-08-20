@@ -21,6 +21,7 @@ from .models import AIInsight, AIPlanRun, InsightType, SlotNotificationBasis
 from .openai_client import OpenAIClientError, OpenAIConfigurationError, create_structured_response
 from .services import (
     build_policy_recommended_slots,
+    cancel_nearest_upcoming_pc_usage_block_notifications,
     create_or_replace_today_plan,
     get_today_pc_usage_patterns,
     is_within_pc_usage_pattern,
@@ -620,6 +621,7 @@ def build_policy_output(user, context_snapshot, next_activity_plan, input_snapsh
         next_activity_plan=next_activity_plan,
         base_time=timezone.now().replace(microsecond=0),
         include_frequency_slots=include_frequency_slots,
+        prioritize_pc_usage_windows=include_frequency_slots,
     )
 
     return {
@@ -730,6 +732,7 @@ def normalize_ai_slots(
         next_activity_plan=next_activity_plan,
         base_time=now,
         include_frequency_slots=use_ai_decision,
+        prioritize_pc_usage_windows=use_ai_decision,
     )
     normalized = []
 
@@ -1058,7 +1061,7 @@ def generate_ai_recovery_plan(
         is_ai_generated=is_ai_generated,
         use_ai_decision=use_ai_decision,
     )
-    return _persist_ai_plan(
+    plan = _persist_ai_plan(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
@@ -1069,6 +1072,14 @@ def generate_ai_recovery_plan(
         notification_enabled=notification_enabled,
         generator_name=generator_name,
     )
+
+    if not use_ai_decision:
+        # 상태 선택 모달로 사용자가 스스로 알림을 설정한 것 — 이미 서비스에
+        # 들어와서 인지한 상태라, 곧 다가올 PC 사용 블록 중 가장 가까운 것 하나는
+        # 중복으로 안 울리게 정리한다(더 먼 블록들은 그대로 둠).
+        cancel_nearest_upcoming_pc_usage_block_notifications(user=user)
+
+    return plan
 
 
 def _generate_plan_output(*, user, context_snapshot, next_activity_plan, input_snapshot, use_ai_decision):

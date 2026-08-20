@@ -774,6 +774,230 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(ai_run.model_name, "server_policy")
         self.assertFalse(ai_run.output_snapshot_json["raw_response"]["external_api_called"])
 
+    def test_ai_generate_policy_fallback_repeats_within_each_pc_usage_window(self):
+        """
+        LLM이 없을 때(OPENAI_API_KEY 없음, 클래스 기본값) My Digital State
+        흐름(use_ai_decision=True)의 정책 폴백은 PC 사용 패턴의 연속된 시간
+        블록(윈도우)마다 그 안에서 상태 기반 interval 간격으로 반복되는 알림을
+        배치해야 한다 — 블록 중간 지점 딱 1개로 뭉개지면 안 되고(긴 블록일수록
+        더 자주 와야 함), 상태 인터벌 반복(SNAPSHOT)으로도 뭉개지면 안 된다.
+        self.state(NECK_STIFF)는 RECOVERY_INTERVAL_MINUTES_BY_STATE에 없어서
+        기본 간격(45분)이 적용된다.
+        """
+        user, _ = User.objects.get_or_create(
+            id=self.device_code, defaults={"timezone": "Asia/Seoul"}
+        )
+        today_day = today_day_of_week_for_user(user)
+        # 연속된 두 개의 블록: 06~08시, 10~12시 — 서로 떨어져 있어 별도 윈도우.
+        for hour in [6, 7, 10, 11]:
+            PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=hour, is_used=True)
+
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+
+        fixed_now = timezone.now().replace(hour=5, minute=0, second=0, microsecond=0)
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                    "use_ai_decision": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
+        self.assertEqual(ai_run.model_name, "server_policy")
+
+        plan_id = response.data["data"]["id"]
+        created_slots = list(
+            RecoverySlot.objects.filter(recovery_plan_id=plan_id).order_by("sequence_no")
+        )
+        self.assertEqual(len(created_slots), 4)
+        self.assertEqual(
+            [slot.recommended_at for slot in created_slots],
+            [
+                fixed_now.replace(hour=6, minute=45),
+                fixed_now.replace(hour=7, minute=30),
+                fixed_now.replace(hour=10, minute=45),
+                fixed_now.replace(hour=11, minute=30),
+            ],
+        )
+        self.assertTrue(all(slot.notification_basis == SlotNotificationBasis.FREQUENCY for slot in created_slots))
+
+    def test_ai_generate_prefers_actual_session_history_over_uniform_interval(self):
+        """
+        My Digital State 흐름은 상태 선택 모달과 달리 "그냥 인터벌 기계적 반복"이면
+        안 되고, 실제 과거 세션 기록을 분석해서 자주 활동했던 시간대를 우선 써야
+        한다(간격이 균일할 필요 없음). PC 사용 블록(10~14시) 안에서 사용자가
+        지난 3주간 매주 같은 요일 11:15 즈음 세션을 완료해왔다면, 그 블록 안의
+        상태 interval 균일 반복(45분 간격 여러 개) 대신 11:15 하나로 배치돼야
+        한다.
+        """
+        user, _ = User.objects.get_or_create(
+            id=self.device_code, defaults={"timezone": "Asia/Seoul"}
+        )
+        today_day = today_day_of_week_for_user(user)
+        for hour in [10, 11, 12, 13]:
+            PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=hour, is_used=True)
+
+        shift = ActivityType.objects.create(
+            code="shift_history_test",
+            stage_type=StageType.BRAIN_SHIFT,
+            target_state=self.state,
+            name="테스트용 이완",
+            default_duration_sec=90,
+        )
+        fixed_now = timezone.now().replace(hour=8, minute=0, second=0, microsecond=0)
+        history_plan = RecoveryPlan.objects.create(user=user, plan_date=today_for_user(user))
+        history_slot = RecoverySlot.objects.create(
+            recovery_plan=history_plan,
+            sequence_no=1,
+            recommended_at=fixed_now.replace(hour=11, minute=15),
+        )
+        history_routine = RoutineInstance.objects.create(
+            recovery_slot=history_slot,
+            activity=shift,
+            sequence_no=1,
+            difficulty_level=1,
+            planned_duration_sec=90,
+        )
+        for weeks_ago in [1, 2, 3]:
+            started_at = fixed_now.replace(hour=11, minute=15) - timedelta(days=7 * weeks_ago)
+            Session.objects.create(
+                user=user,
+                recovery_slot=history_slot,
+                routine_instance=history_routine,
+                activity=shift,
+                started_at=started_at,
+                ended_at=started_at + timedelta(minutes=2),
+                duration_sec=120,
+                accuracy=100,
+                status=SessionStatus.COMPLETED,
+            )
+
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                    "use_ai_decision": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        plan_id = response.data["data"]["id"]
+        created_slots = list(
+            RecoverySlot.objects.filter(recovery_plan_id=plan_id).order_by("sequence_no")
+        )
+        self.assertEqual(len(created_slots), 1)
+        self.assertEqual(created_slots[0].recommended_at, fixed_now.replace(hour=11, minute=15))
+        self.assertEqual(created_slots[0].notification_basis, SlotNotificationBasis.FREQUENCY)
+
+    def test_modal_generate_cancels_only_nearest_upcoming_pc_usage_block(self):
+        """
+        My Digital State로 06~08시/10~12시 두 블록에 알림을 미리 만들어둔 뒤,
+        06시 되기 전(05:00)에 사용자가 상태 선택 모달로 알림을 직접 설정하면
+        —"이미 서비스에 들어와서 인지했다"고 보고— 가장 가까운 06~08시 블록의
+        알림만 취소되고, 더 먼 10~12시 블록은 그대로 남아있어야 한다.
+        """
+        user, _ = User.objects.get_or_create(
+            id=self.device_code, defaults={"timezone": "Asia/Seoul"}
+        )
+        today_day = today_day_of_week_for_user(user)
+        for hour in [6, 7, 10, 11]:
+            PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=hour, is_used=True)
+
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+        fixed_now = timezone.now().replace(hour=5, minute=0, second=0, microsecond=0)
+        NextActivityPlan.objects.filter(id=activity_plan_response.data["data"]["id"]).update(
+            created_at=fixed_now,
+        )
+
+        # 1) My Digital State 흐름 — 06~08시/10~12시 블록마다 45분 간격 알림 미리
+        # 생성(06:45,07:30 / 10:45,11:30)
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                    "use_ai_decision": True,
+                },
+                format="json",
+            )
+
+        # 2) 06시 되기 전, 상태 선택 모달로 알림 설정(use_ai_decision 안 보냄)
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            modal_response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                },
+                format="json",
+            )
+
+        self.assertEqual(modal_response.status_code, status.HTTP_201_CREATED)
+        final_plan_id = modal_response.data["data"]["id"]
+        frequency_slots = {
+            slot.recommended_at: slot.status
+            for slot in RecoverySlot.objects.filter(
+                recovery_plan_id=final_plan_id,
+                notification_basis=SlotNotificationBasis.FREQUENCY,
+            )
+        }
+        # 가장 가까운 06~08시 블록의 알림 2개는 전부 취소, 더 먼 10~12시 블록의
+        # 알림 2개는 그대로 남아있어야 한다.
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=6, minute=45)], SlotStatus.CANCELED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=7, minute=30)], SlotStatus.CANCELED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=10, minute=45)], SlotStatus.RECOMMENDED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=11, minute=30)], SlotStatus.RECOMMENDED)
+
     @override_settings(OPENAI_API_KEY="test-key")
     @patch("plans.ai_planner.create_structured_response")
     def test_ai_generate_never_calls_llm_when_use_ai_decision_omitted(
