@@ -587,6 +587,39 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_response.status_code, status.HTTP_200_OK)
         self.assertEqual(history_response.data["data"][0]["id"], slot_id)
 
+    def test_today_slot_list_cancels_pattern_notification_close_to_entry_time(self):
+        """
+        오늘 슬롯 목록 조회(=서비스 진입 시점)에서 cleanup_nearby_pattern_notifications_on_entry가
+        같이 돌아서, 지금과 가까운(기본 30분 이내) 빈도 기반 알림은 CANCELED 처리돼야 한다.
+        먼 미래의 슬롯은 그대로 열려있어야 한다.
+        """
+        user = User.objects.get(id=self.device_code)
+        plan = RecoveryPlan.objects.create(
+            user=user,
+            plan_date=today_for_user(user),
+            status=PlanStatus.ACTIVE,
+        )
+        nearby_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=1,
+            recommended_at=timezone.now() + timedelta(minutes=10),
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        )
+        far_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=2,
+            recommended_at=timezone.now() + timedelta(hours=3),
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        )
+
+        response = self.client.get("/api/v1/plans/recovery-slots/today/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        nearby_slot.refresh_from_db()
+        far_slot.refresh_from_db()
+        self.assertEqual(nearby_slot.status, SlotStatus.CANCELED)
+        self.assertEqual(far_slot.status, SlotStatus.RECOMMENDED)
+
     def test_ai_generate_uses_fixed_wake_shift_groups_and_reset(self):
         eye_state, _ = StateOption.objects.get_or_create(
             code="EYE_TIRED",
@@ -882,18 +915,18 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(len(date_response.data["data"]), 3)
 
         history_statuses = {item["id"]: item["history_status"] for item in date_response.data["data"]}
-        self.assertEqual(history_statuses[str(missed_slot.id)], "UPCOMING")
+        self.assertEqual(history_statuses[str(missed_slot.id)], "MISSED")
         self.assertEqual(history_statuses[str(completed_slot.id)], "COMPLETED")
         self.assertEqual(history_statuses[str(upcoming_slot.id)], "UPCOMING")
 
         missed_item = next(item for item in date_response.data["data"] if item["id"] == str(missed_slot.id))
-        self.assertEqual(missed_item["history_status_label"], "진행 예정")
+        self.assertEqual(missed_item["history_status_label"], "미완료")
         self.assertIn("목이 뻐근해요", missed_item["input_summary"])
         self.assertIn("과제", missed_item["input_summary"])
         self.assertIn("45분 예정", missed_item["input_summary"])
         self.assertEqual(missed_item["recommended_routines"][0]["activity"]["code"], "history_neck_shift")
         self.assertEqual(missed_item["recommended_routines"][0]["reason"], "목 긴장을 낮추기 위한 루틴입니다.")
-        self.assertEqual(missed_item["remark"], "brainfit의 추천 시간")
+        self.assertEqual(missed_item["remark"], "연속 사용 전에 짧은 휴식이 필요합니다.")
         self.assertIn("디지털 사용 패턴", missed_item["data_source_summary"]["labels"])
         self.assertIn("디지털 사용 패턴", missed_item["data_notice"])
 
