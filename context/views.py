@@ -15,6 +15,7 @@ from .serializers import (
     UserContextSnapshotSerializer,
 )
 from .services import get_state_frequency
+from .services import get_current_valid_next_activity_plan
 from .utils import today_for_user
 
 
@@ -90,6 +91,19 @@ class NextActivityPlanTodayView(EnvelopeMixin, generics.RetrieveAPIView):
         if obj is None:
             raise NotFound("오늘 등록된 이후 활동 계획이 없습니다.")
         return obj
+
+
+class CurrentNextActivityPlanView(EnvelopeMixin, APIView):
+    """GET /context/next-activity-plans/current/ — 아직 유효한 이후 활동 계획 조회."""
+
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "head", "options"]
+
+    def get(self, request, *args, **kwargs):
+        plan = get_current_valid_next_activity_plan(request.user)
+        if plan is None:
+            raise NotFound("현재 유효한 이후 활동 계획이 없습니다.")
+        return Response(NextActivityPlanSerializer(plan).data)
 
 
 class NextActivityPlanCreateView(EnvelopeMixin, generics.CreateAPIView):

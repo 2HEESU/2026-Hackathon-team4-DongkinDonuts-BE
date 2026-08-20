@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -5,7 +7,17 @@ from context.models import NextActivityPlan, UserContextSnapshot
 from routines.serializers import ActivityTypeSerializer
 from sessions_app.models import DifficultyFeedback, RecoveryFeeling, SessionFeedback
 
-from .models import AIInsight, InsightType, Notification, RecoveryPlan, RecoverySlot, SlotStatus, WebPushSubscription
+from .models import (
+    AIInsight,
+    InsightType,
+    Notification,
+    NotificationKind,
+    NotificationStatus,
+    RecoveryPlan,
+    RecoverySlot,
+    SlotStatus,
+    WebPushSubscription,
+)
 
 
 AI_SOURCE_LABELS = {
@@ -30,6 +42,8 @@ HISTORY_STATUS_LABELS = {
     "IN_PROGRESS": "진행중",
     "CANCELED": "취소",
 }
+
+NOTIFICATION_RESPONSE_GRACE_MINUTES = 10
 
 
 def unique_list(values):
@@ -133,8 +147,25 @@ def history_status_for_slot(slot, now):
         return "CANCELED"
     if slot.status == SlotStatus.STARTED:
         return "IN_PROGRESS"
+    if _has_expired_sent_recovery_notification(slot, now):
+        return "CANCELED"
+    if slot.effective_time and slot.effective_time < now:
+        return "MISSED"
 
     return "UPCOMING"
+
+
+def _has_expired_sent_recovery_notification(slot, now):
+    for notification in slot.notifications.all():
+        if (
+            notification.kind != NotificationKind.RECOVERY_SLOT
+            or notification.status != NotificationStatus.SENT
+        ):
+            continue
+        sent_at = notification.sent_at or notification.scheduled_at
+        if sent_at and sent_at + timedelta(minutes=NOTIFICATION_RESPONSE_GRACE_MINUTES) <= now:
+            return True
+    return False
 
 
 def slot_input_summary(slot):
@@ -275,6 +306,7 @@ class RecoverySlotSerializer(serializers.ModelSerializer):
             "interval_minutes",
             "repeat_rule",
             "notification_enabled",
+            "notification_basis",
             "status",
             "insights",
             "data_source_summary",
@@ -508,6 +540,21 @@ class RecoverySlotCreateSerializer(OwnedContextInputMixin, serializers.Serialize
 
 class RecoverySlotScheduleSerializer(serializers.Serializer):
     scheduled_at = serializers.DateTimeField()
+
+
+class RecoverySlotCancelBeforeSerializer(serializers.Serializer):
+    before = serializers.DateTimeField()
+    exclude_slot = serializers.PrimaryKeyRelatedField(
+        queryset=RecoverySlot.objects.all(),
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+
+    def validate_exclude_slot(self, value):
+        if value is not None and value.recovery_plan.user_id != self.context["request"].user.id:
+            raise serializers.ValidationError("본인의 회복 슬롯만 제외할 수 있습니다.")
+        return value
 
 
 class RecoverySlotNotificationSerializer(serializers.Serializer):

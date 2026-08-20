@@ -9,7 +9,7 @@ from rest_framework.exceptions import ValidationError
 from context.models import NextActivityPlan, UserContextSnapshot
 from context.utils import today_for_user
 from digital_state.models import DayOfWeek, PcUsagePattern
-from sessions_app.models import SessionFeedback
+from sessions_app.models import Session, SessionFeedback, SessionStatus
 
 from .models import (
     Notification,
@@ -18,6 +18,7 @@ from .models import (
     PlanStatus,
     RecoveryPlan,
     RecoverySlot,
+    SlotNotificationBasis,
     SlotStatus,
     WebPushSubscription,
 )
@@ -45,7 +46,12 @@ RECOVERY_INTERVAL_MINUTES_BY_STATE = {
     "SLEEPY": 30,
 }
 DEFAULT_RECOVERY_INTERVAL_MINUTES = 45
-MAX_POLICY_RECOMMENDED_TIMES = 6
+MAX_POLICY_RECOMMENDED_TIMES = 12
+PREVIOUS_SESSION_FREQUENCY_LOOKBACK_DAYS = 30
+PREVIOUS_SESSION_FREQUENCY_MIN_COUNT = 3
+FREQUENCY_CLUSTER_TOLERANCE_MINUTES = 30
+MAX_PREVIOUS_SESSION_FREQUENCY_TIMES = 2
+NOTIFICATION_RESPONSE_GRACE_MINUTES = 10
 
 
 def today_day_of_week_for_user(user):
@@ -132,6 +138,10 @@ def plan_has_today_pc_usage_pattern(plan):
     return bool(plan.generation_snapshot_json.get("has_today_pc_usage_pattern", False))
 
 
+def notification_basis_for_plan(plan):
+    return SlotNotificationBasis.SNAPSHOT
+
+
 def get_next_open_slot(plan):
     return (
         plan.slots.filter(status__in=OPEN_SLOT_STATUSES)
@@ -141,7 +151,18 @@ def get_next_open_slot(plan):
     )
 
 
+def get_runnable_slot(plan):
+    started_slot = (
+        plan.slots.filter(status=SlotStatus.STARTED)
+        .annotate(effective_at=Coalesce("user_changed_at", "scheduled_at", "recommended_at"))
+        .order_by("effective_at", "sequence_no")
+        .first()
+    )
+    return started_slot or get_next_open_slot(plan)
+
+
 def get_next_slot_for_user(user):
+    expire_unanswered_recovery_slots(user=user)
     plan = (
         RecoveryPlan.objects.filter(
             user=user,
@@ -154,6 +175,22 @@ def get_next_slot_for_user(user):
     if plan is None:
         return None
     return get_next_open_slot(plan)
+
+
+def get_runnable_slot_for_user(user):
+    expire_unanswered_recovery_slots(user=user)
+    plan = (
+        RecoveryPlan.objects.filter(
+            user=user,
+            plan_date=today_for_user(user),
+            status=PlanStatus.ACTIVE,
+        )
+        .prefetch_related("slots")
+        .first()
+    )
+    if plan is None:
+        return None
+    return get_runnable_slot(plan)
 
 
 def build_notification_message(slot):
@@ -251,13 +288,61 @@ def sync_slot_notification(slot):
     return notification
 
 
+def _slot_effective_time_annotation():
+    return Coalesce("user_changed_at", "scheduled_at", "recommended_at")
+
+
+def _open_slots_for_plan(plan, *, notification_basis=None):
+    queryset = RecoverySlot.objects.select_for_update().filter(
+        recovery_plan=plan,
+        status__in=OPEN_SLOT_STATUSES,
+    )
+    if notification_basis is not None:
+        queryset = queryset.filter(notification_basis=notification_basis)
+    return queryset.annotate(effective_at=_slot_effective_time_annotation())
+
+
+def _cancel_open_slots(slots):
+    canceled_slots = []
+    for slot in slots:
+        if slot.status not in OPEN_SLOT_STATUSES:
+            continue
+        slot.status = SlotStatus.CANCELED
+        slot.save(update_fields=["status", "updated_at"])
+        sync_slot_notification(slot)
+        canceled_slots.append(slot)
+    return canceled_slots
+
+
+@transaction.atomic
+def expire_unanswered_recovery_slots(*, user=None, now=None):
+    now = now or timezone.now()
+    deadline = now - timedelta(minutes=NOTIFICATION_RESPONSE_GRACE_MINUTES)
+    queryset = RecoverySlot.objects.select_for_update().filter(
+        status__in=OPEN_SLOT_STATUSES,
+        notifications__kind=NotificationKind.RECOVERY_SLOT,
+        notifications__status=NotificationStatus.SENT,
+        notifications__sent_at__lte=deadline,
+    )
+    if user is not None:
+        queryset = queryset.filter(recovery_plan__user=user)
+
+    slots = list(
+        queryset.exclude(sessions__isnull=False)
+        .distinct()
+        .annotate(effective_at=_slot_effective_time_annotation())
+        .order_by("effective_at", "sequence_no")
+    )
+    return _cancel_open_slots(slots)
+
+
 def _minute_floor(value):
     return value.replace(second=0, microsecond=0)
 
 
 def recommend_next_reset_time(next_activity_plan=None, base_time=None, context_snapshot=None):
     """
-    AI 추천 전까지 쓰는 정책 기반 기본값.
+    다음 회복 슬롯 시각을 계산하는 정책 기반 기본값.
 
     첨부 정책집 기준으로 현재 상태별 타이머 간격을 사용한다. 사용자가 시간을 직접
     지정하는 수동/예약 흐름은 view가 recommended_at/recommended_times를 명시 전달한다.
@@ -298,6 +383,239 @@ def _today_pc_usage_windows(user):
     return windows
 
 
+def _activity_window_end(next_activity_plan, base_time):
+    expected_minutes = getattr(next_activity_plan, "expected_activity_minutes", None)
+    if not expected_minutes:
+        return None
+
+    started_at = getattr(next_activity_plan, "created_at", None) or base_time
+    return _minute_floor(started_at) + timedelta(minutes=expected_minutes)
+
+
+def _activity_interval_times(*, base_time, end_time, interval, max_slots):
+    if end_time is None:
+        return [base_time + interval]
+
+    if end_time <= base_time:
+        return [base_time + interval]
+
+    times = []
+    candidate = base_time + interval
+    while candidate <= end_time and len(times) < max_slots:
+        times.append(candidate)
+        candidate += interval
+
+    if not times:
+        times.append(_minute_floor(end_time))
+    return times
+
+
+def _local_datetime(value):
+    if timezone.is_aware(value):
+        return timezone.localtime(value)
+    return value
+
+
+def _minute_of_day(value):
+    return value.hour * 60 + value.minute
+
+
+def _pc_usage_pattern_hour_keys(user):
+    return set(
+        PcUsagePattern.objects.filter(user=user, is_used=True).values_list(
+            "day_of_week",
+            "hour",
+        )
+    )
+
+
+def _matches_pc_usage_pattern(value, pattern_keys):
+    local_value = _local_datetime(value)
+    return (WEEKDAY_TO_DAY_OF_WEEK[local_value.weekday()], local_value.hour) in pattern_keys
+
+
+def _today_pattern_hours(user):
+    today_day_of_week = today_day_of_week_for_user(user)
+    return set(
+        PcUsagePattern.objects.filter(
+            user=user,
+            day_of_week=today_day_of_week,
+            is_used=True,
+        ).values_list("hour", flat=True)
+    )
+
+
+def _top_frequency_minute_clusters(minutes, max_clusters):
+    remaining = sorted(minutes)
+    clusters = []
+
+    while remaining and len(clusters) < max_clusters:
+        best_cluster = []
+        best_average = 0
+
+        for anchor in remaining:
+            cluster = [
+                minute
+                for minute in remaining
+                if abs(minute - anchor) <= FREQUENCY_CLUSTER_TOLERANCE_MINUTES
+            ]
+            average = sum(cluster) / len(cluster)
+            if len(cluster) > len(best_cluster) or (
+                len(cluster) == len(best_cluster) and average < best_average
+            ):
+                best_cluster = cluster
+                best_average = average
+
+        if len(best_cluster) < PREVIOUS_SESSION_FREQUENCY_MIN_COUNT:
+            break
+
+        clusters.append(
+            {
+                "minute": min(23 * 60 + 59, max(0, round(best_average))),
+                "count": len(best_cluster),
+            }
+        )
+        for minute in best_cluster:
+            remaining.remove(minute)
+
+    clusters.sort(key=lambda item: (-item["count"], item["minute"]))
+    return clusters[:max_clusters]
+
+
+def _previous_session_frequency_times(*, user, base_time, max_slots):
+    pattern_keys = _pc_usage_pattern_hour_keys(user)
+    today_hours = _today_pattern_hours(user)
+    if not pattern_keys or not today_hours:
+        return []
+
+    since = base_time - timedelta(days=PREVIOUS_SESSION_FREQUENCY_LOOKBACK_DAYS)
+    sessions = (
+        Session.objects.filter(
+            user=user,
+            status=SessionStatus.COMPLETED,
+            started_at__gte=since,
+        )
+        .exclude(started_at__isnull=True)
+        .order_by("-started_at")
+    )
+
+    session_minutes = [
+        _minute_of_day(_local_datetime(session.started_at))
+        for session in sessions
+        if _matches_pc_usage_pattern(session.started_at, pattern_keys)
+    ]
+    frequent_clusters = _top_frequency_minute_clusters(session_minutes, max_slots)
+
+    plan_date = today_for_user(user)
+    times = []
+    for cluster in frequent_clusters:
+        minute_of_day = cluster["minute"]
+        hour = minute_of_day // 60
+        minute = minute_of_day % 60
+        if hour not in today_hours:
+            continue
+        candidate = datetime.combine(plan_date, time(hour=hour, minute=minute))
+        if candidate <= base_time:
+            continue
+        times.append(candidate)
+
+    return sorted(times)
+
+
+def _merge_recommended_slot(slots_by_time, *, recommended_at, notification_basis, reason, data_sources):
+    key = _minute_floor(recommended_at)
+    existing = slots_by_time.get(key)
+    if existing is None:
+        slots_by_time[key] = {
+            "recommended_at": key,
+            "notification_basis": notification_basis,
+            "reason": reason,
+            "data_sources": list(data_sources),
+        }
+        return
+
+    if notification_basis == SlotNotificationBasis.FREQUENCY:
+        existing["notification_basis"] = SlotNotificationBasis.FREQUENCY
+    if reason and reason not in existing["reason"]:
+        existing["reason"] = f"{existing['reason']} {reason}".strip()
+    for source in data_sources:
+        if source not in existing["data_sources"]:
+            existing["data_sources"].append(source)
+
+
+def _slot_input_time_key(slot_input):
+    recommended_at = slot_input.get("recommended_at")
+    return _minute_floor(recommended_at) if recommended_at else None
+
+
+def _append_slot_input(slot_inputs, slot_input):
+    key = _slot_input_time_key(slot_input)
+    if key is None:
+        slot_inputs.append(slot_input)
+        return
+
+    for existing in slot_inputs:
+        if _slot_input_time_key(existing) != key:
+            continue
+        if slot_input.get("notification_basis") == SlotNotificationBasis.FREQUENCY:
+            existing["notification_basis"] = SlotNotificationBasis.FREQUENCY
+        if "notification_enabled" in slot_input and "notification_enabled" not in existing:
+            existing["notification_enabled"] = slot_input["notification_enabled"]
+        return
+
+    slot_inputs.append(slot_input)
+
+
+def build_policy_recommended_slots(
+    *,
+    user,
+    context_snapshot=None,
+    next_activity_plan=None,
+    base_time=None,
+    max_slots=MAX_POLICY_RECOMMENDED_TIMES,
+):
+    """상태 기반 스냅샷 슬롯과 빈도 기반 슬롯을 함께 계산한다."""
+
+    base_time = _minute_floor(base_time or timezone.now())
+    policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
+    interval_minutes = recovery_interval_minutes_for_context(policy_context)
+    interval = timedelta(minutes=interval_minutes)
+    slots_by_time = {}
+
+    activity_end = _activity_window_end(next_activity_plan, base_time)
+    for recommended_at in _activity_interval_times(
+        base_time=base_time,
+        end_time=activity_end,
+        interval=interval,
+        max_slots=max_slots,
+    ):
+        _merge_recommended_slot(
+            slots_by_time,
+            recommended_at=recommended_at,
+            notification_basis=SlotNotificationBasis.SNAPSHOT,
+            reason="이후 활동 시간 동안 현재 상태에 맞춘 회복 간격으로 배치했습니다.",
+            data_sources=["context_snapshot", "next_activity_plan", "time_policy"],
+        )
+
+    remaining_slots = max(0, min(MAX_PREVIOUS_SESSION_FREQUENCY_TIMES, max_slots - len(slots_by_time)))
+    if remaining_slots:
+        for recommended_at in _previous_session_frequency_times(
+            user=user,
+            base_time=base_time,
+            max_slots=remaining_slots,
+        ):
+            _merge_recommended_slot(
+                slots_by_time,
+                recommended_at=recommended_at,
+                notification_basis=SlotNotificationBasis.FREQUENCY,
+                reason="주간 PC 사용 패턴과 최근 회복 세션 기록이 함께 몰린 시간대에 배치했습니다.",
+                data_sources=["pc_usage_patterns", "previous_sessions", "time_policy"],
+            )
+
+    slots = sorted(slots_by_time.values(), key=lambda item: item["recommended_at"])
+    return slots[:max_slots]
+
+
 def build_policy_recommended_times(
     *,
     user,
@@ -306,39 +624,16 @@ def build_policy_recommended_times(
     base_time=None,
     max_slots=MAX_POLICY_RECOMMENDED_TIMES,
 ):
-    """
-    상태별 타이머 정책을 실제 추천 시각 목록으로 펼친다.
-
-    오늘 PC 사용 패턴이 있으면 남은 사용 구간 안에 정책 간격으로 최대 max_slots개를
-    배치하고, 없으면 다음 세션 1개만 만든다.
-    """
-
-    base_time = _minute_floor(base_time or timezone.now())
-    policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
-    interval_minutes = recovery_interval_minutes_for_context(policy_context)
-    interval = timedelta(minutes=interval_minutes)
-    fallback_time = base_time + interval
-
-    if not has_today_pc_usage_pattern(user):
-        return [fallback_time]
-
-    plan_date = today_for_user(user)
-    recommended_times = []
-    for start_at, end_at in _today_pc_usage_windows(user):
-        if end_at <= base_time:
-            continue
-        candidate = max(start_at, base_time) + interval
-        while (
-            candidate <= end_at
-            and candidate.date() == plan_date
-            and len(recommended_times) < max_slots
-        ):
-            recommended_times.append(candidate)
-            candidate += interval
-        if len(recommended_times) >= max_slots:
-            break
-
-    return recommended_times or [fallback_time]
+    return [
+        slot["recommended_at"]
+        for slot in build_policy_recommended_slots(
+            user=user,
+            context_snapshot=context_snapshot,
+            next_activity_plan=next_activity_plan,
+            base_time=base_time,
+            max_slots=max_slots,
+        )
+    ]
 
 
 def build_plan_generation_snapshot(user, context_snapshot=None, next_activity_plan=None):
@@ -381,6 +676,11 @@ def serialize_next_activity_plan(next_activity_plan):
         return None
     return {
         "id": str(next_activity_plan.id),
+        "context_snapshot": (
+            str(next_activity_plan.context_snapshot_id)
+            if next_activity_plan.context_snapshot_id
+            else None
+        ),
         "activity_tags": list(next_activity_plan.activity_tag_links.values_list("activity_tag_id", flat=True)),
         "expected_activity_minutes": next_activity_plan.expected_activity_minutes,
         "created_at": next_activity_plan.created_at.isoformat() if next_activity_plan.created_at else None,
@@ -401,25 +701,49 @@ def create_or_replace_today_plan(
     context_snapshot=None,
     next_activity_plan=None,
     recommended_times=None,
+    recommended_slots=None,
     notification_enabled=True,
     ai_plan_run=None,
 ):
     """
     오늘 active RecoveryPlan을 새로 만든다.
 
-    기존 active plan은 REPLACED로 닫고 새 plan을 만든다. PC 패턴이 없는 계획은 호출 한 번에
-    하나의 RecoverySlot만 만든다. PC 패턴이 있는 계획은 recommended_times로 넘어온 하루치
-    후보들을 그대로 슬롯화한다.
+    기존 active plan은 REPLACED로 닫고 새 plan을 만든다.
+
+    recommended_times는 기존 호출부 호환용이고, 슬롯마다 알림 basis를 지정해야 하는 정책 생성
+    흐름은 recommended_slots를 사용한다.
     """
 
     validate_context_inputs(user, context_snapshot, next_activity_plan)
 
     plan_date = today_for_user(user)
-    RecoveryPlan.objects.filter(
-        user=user,
-        plan_date=plan_date,
-        status=PlanStatus.ACTIVE,
-    ).update(status=PlanStatus.REPLACED)
+    now = timezone.now()
+    active_plans = list(
+        RecoveryPlan.objects.select_for_update().filter(
+            user=user,
+            plan_date=plan_date,
+            status=PlanStatus.ACTIVE,
+        )
+    )
+    preserved_frequency_slot_inputs = []
+    for active_plan in active_plans:
+        for slot in _open_slots_for_plan(
+            active_plan,
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        ).order_by("effective_at", "sequence_no"):
+            if slot.effective_time and slot.effective_time >= now:
+                preserved_frequency_slot_inputs.append(
+                    {
+                        "recommended_at": slot.effective_time,
+                        "notification_basis": SlotNotificationBasis.FREQUENCY,
+                        "notification_enabled": slot.notification_enabled,
+                    }
+                )
+        _cancel_open_slots(
+            _open_slots_for_plan(active_plan).order_by("effective_at", "sequence_no")
+        )
+        active_plan.status = PlanStatus.REPLACED
+        active_plan.save(update_fields=["status", "updated_at"])
 
     generation_snapshot = build_plan_generation_snapshot(user, context_snapshot, next_activity_plan)
     plan = RecoveryPlan.objects.create(
@@ -429,19 +753,33 @@ def create_or_replace_today_plan(
         generation_snapshot_json=generation_snapshot,
     )
 
-    times = list(recommended_times or [])
-    if not times:
-        times = [None]
-    if not generation_snapshot["has_today_pc_usage_pattern"]:
-        times = times[:1]
+    slot_inputs = list(recommended_slots or [])
+    if not slot_inputs:
+        slot_inputs = [
+            {
+                "recommended_at": recommended_at,
+                "notification_basis": notification_basis_for_plan(plan),
+            }
+            for recommended_at in list(recommended_times or [])
+        ]
+    if not slot_inputs:
+        slot_inputs = [
+            {
+                "recommended_at": None,
+                "notification_basis": notification_basis_for_plan(plan),
+            }
+        ]
+    for slot_input in preserved_frequency_slot_inputs:
+        _append_slot_input(slot_inputs, slot_input)
 
-    for recommended_at in times:
+    for slot_input in slot_inputs:
         create_recovery_slot(
             plan=plan,
             context_snapshot=context_snapshot,
             next_activity_plan=next_activity_plan,
-            recommended_at=recommended_at,
-            notification_enabled=notification_enabled,
+            recommended_at=slot_input.get("recommended_at"),
+            notification_enabled=slot_input.get("notification_enabled", notification_enabled),
+            notification_basis=slot_input.get("notification_basis") or notification_basis_for_plan(plan),
             ai_plan_run=ai_plan_run,
         )
     return plan
@@ -455,6 +793,7 @@ def create_recovery_slot(
     next_activity_plan=None,
     recommended_at=None,
     notification_enabled=True,
+    notification_basis=None,
     ai_plan_run=None,
 ):
     validate_context_inputs(plan.user, context_snapshot, next_activity_plan)
@@ -467,6 +806,7 @@ def create_recovery_slot(
             next_activity_plan,
             context_snapshot=context_snapshot,
         )
+    notification_basis = notification_basis or notification_basis_for_plan(locked_plan)
     slot = RecoverySlot.objects.create(
         recovery_plan=locked_plan,
         ai_plan_run=ai_plan_run,
@@ -480,6 +820,7 @@ def create_recovery_slot(
             else None
         ),
         notification_enabled=notification_enabled,
+        notification_basis=notification_basis,
     )
     sync_slot_notification(slot)
     return slot
@@ -499,9 +840,8 @@ def reset_next_activity_and_slot(
     """
     '내 계획 다시 설정' 흐름.
 
-    상태 스냅샷은 새로 만들지 않고 이후 활동 계획만 교체해도 된다. 하루에는 여러 이후 활동과
-    여러 슬롯이 있을 수 있으므로 plan 전체가 아니라 대상 슬롯 하나만 취소한 뒤 새 슬롯을 만든다.
-    target_slot이 없으면 가장 가까운 열린 슬롯을 대상으로 삼고, 열린 슬롯이 없으면 새 슬롯만 만든다.
+    이후 활동은 현재 활성 구간 기준으로 하나만 존재할 수 있으므로, 열린 스냅샷 기반 슬롯은
+    모두 닫고 새 이후 활동 시간 안에서 다시 배치한다. 빈도 기반 슬롯은 독립 알림이라 유지한다.
     """
 
     validate_context_inputs(user, context_snapshot, next_activity_plan)
@@ -516,28 +856,58 @@ def reset_next_activity_and_slot(
         slot_to_replace = RecoverySlot.objects.select_for_update().get(id=target_slot.id, recovery_plan=plan)
         if slot_to_replace.status not in OPEN_SLOT_STATUSES:
             raise ValidationError("열려 있는 회복 슬롯만 다시 설정할 수 있습니다.")
+        if slot_to_replace.notification_basis != SlotNotificationBasis.SNAPSHOT:
+            raise ValidationError("스냅샷 기반 회복 슬롯만 이후 활동으로 다시 설정할 수 있습니다.")
     else:
         slot_to_replace = (
-            RecoverySlot.objects.select_for_update()
-            .filter(recovery_plan=plan, status__in=OPEN_SLOT_STATUSES)
-            .annotate(effective_at=Coalesce("user_changed_at", "scheduled_at", "recommended_at"))
+            _open_slots_for_plan(plan, notification_basis=SlotNotificationBasis.SNAPSHOT)
             .order_by("effective_at", "sequence_no")
             .first()
         )
 
-    if slot_to_replace is not None:
-        slot_to_replace.status = SlotStatus.CANCELED
-        slot_to_replace.save(update_fields=["status", "updated_at"])
-        sync_slot_notification(slot_to_replace)
+    snapshot_slots = _open_slots_for_plan(
+        plan,
+        notification_basis=SlotNotificationBasis.SNAPSHOT,
+    ).order_by("effective_at", "sequence_no")
+    _cancel_open_slots(snapshot_slots)
 
-    return create_recovery_slot(
-        plan=plan,
-        context_snapshot=context_snapshot,
-        next_activity_plan=next_activity_plan,
-        recommended_at=recommended_at,
-        notification_enabled=notification_enabled,
-        ai_plan_run=ai_plan_run,
-    )
+    if recommended_at is not None:
+        replacement_slots = [
+            {
+                "recommended_at": recommended_at,
+                "notification_basis": SlotNotificationBasis.SNAPSHOT,
+            }
+        ]
+    else:
+        replacement_slots = [
+            slot
+            for slot in build_policy_recommended_slots(
+                user=user,
+                context_snapshot=context_snapshot,
+                next_activity_plan=next_activity_plan,
+                base_time=timezone.now(),
+            )
+            if slot["notification_basis"] == SlotNotificationBasis.SNAPSHOT
+        ]
+
+    if not replacement_slots:
+        replacement_slots = [{"recommended_at": None, "notification_basis": SlotNotificationBasis.SNAPSHOT}]
+
+    created_slots = []
+    for slot_input in replacement_slots:
+        created_slots.append(
+            create_recovery_slot(
+                plan=plan,
+                context_snapshot=context_snapshot,
+                next_activity_plan=next_activity_plan,
+                recommended_at=slot_input.get("recommended_at"),
+                notification_enabled=notification_enabled,
+                notification_basis=SlotNotificationBasis.SNAPSHOT,
+                ai_plan_run=ai_plan_run,
+            )
+        )
+
+    return created_slots[0]
 
 
 @transaction.atomic
@@ -573,6 +943,7 @@ def schedule_next_slot_after_completed_slot(
         next_activity_plan=next_activity_plan,
         recommended_at=recommended_at,
         notification_enabled=notification_enabled,
+        notification_basis=SlotNotificationBasis.SNAPSHOT,
         ai_plan_run=ai_plan_run,
     )
 
@@ -602,6 +973,47 @@ def schedule_slot_time(*, slot, scheduled_at):
 
 @transaction.atomic
 def cancel_slot(*, slot):
+    slot.status = SlotStatus.CANCELED
+    slot.save(update_fields=["status", "updated_at"])
+    sync_slot_notification(slot)
+    return slot
+
+
+def _open_snapshot_slots_for_user(user):
+    return (
+        RecoverySlot.objects.select_for_update()
+        .select_related("recovery_plan")
+        .filter(
+            recovery_plan__user=user,
+            recovery_plan__plan_date=today_for_user(user),
+            recovery_plan__status=PlanStatus.ACTIVE,
+            notification_basis=SlotNotificationBasis.SNAPSHOT,
+            status__in=OPEN_SLOT_STATUSES,
+        )
+        .annotate(effective_at=_slot_effective_time_annotation())
+    )
+
+
+@transaction.atomic
+def cancel_snapshot_slots_before(*, user, before, exclude_slot=None):
+    queryset = _open_snapshot_slots_for_user(user).filter(effective_at__lt=before)
+    if exclude_slot is not None:
+        queryset = queryset.exclude(id=exclude_slot.id)
+
+    slots = list(queryset.order_by("effective_at", "sequence_no"))
+    for slot in slots:
+        slot.status = SlotStatus.CANCELED
+        slot.save(update_fields=["status", "updated_at"])
+        sync_slot_notification(slot)
+    return slots
+
+
+@transaction.atomic
+def cancel_next_snapshot_slot_for_reentry(*, user, now=None):
+    now = now or timezone.now()
+    slot = _open_snapshot_slots_for_user(user).filter(effective_at__gt=now).order_by("effective_at", "sequence_no").first()
+    if slot is None:
+        return None
     slot.status = SlotStatus.CANCELED
     slot.save(update_fields=["status", "updated_at"])
     sync_slot_notification(slot)
