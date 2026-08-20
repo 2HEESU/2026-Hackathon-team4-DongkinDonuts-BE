@@ -1,10 +1,11 @@
 from datetime import timedelta
 
 from django.db.models import Count
+from django.utils import timezone
 
 from common.models import StateOption
 
-from .models import UserContextSnapshotState
+from .models import NextActivityPlan, UserContextSnapshotState
 from .utils import today_for_user
 
 DEFAULT_STATE_FREQUENCY_DAYS = 30
@@ -39,3 +40,30 @@ def get_state_frequency(user, days=DEFAULT_STATE_FREQUENCY_DAYS):
     ]
     results.sort(key=lambda item: item["count"], reverse=True)
     return results
+
+
+def get_current_valid_next_activity_plan(user, now=None):
+    """
+    오늘 사용자가 만든 이후 활동 중 아직 예상 활동 시간이 끝나지 않은 최신 계획을 반환한다.
+
+    새 상태 점검이 들어와도 유효한 이후 활동이 있으면 활동 종류/시간과 그 활동에 붙은
+    기존 상태 스냅샷을 유지해야 하므로, 생성 시각 + expected_activity_minutes를
+    활동의 유효 구간으로 본다.
+    """
+
+    now = now or timezone.now()
+    plans = (
+        NextActivityPlan.objects.filter(
+            user=user,
+            service_date=today_for_user(user),
+            expected_activity_minutes__isnull=False,
+        )
+        .select_related("context_snapshot")
+        .order_by("-created_at")
+    )
+
+    for plan in plans:
+        valid_until = plan.created_at + timedelta(minutes=plan.expected_activity_minutes)
+        if valid_until > now:
+            return plan
+    return None

@@ -311,6 +311,10 @@ pyrightconfig.json
 pyvenv.cfg
 pip-selfcheck.json
 
+# Repository scripts
+!scripts/
+!scripts/deploy.sh
+
 ### VisualStudioCode ###
 .vscode/*
 !.vscode/settings.json

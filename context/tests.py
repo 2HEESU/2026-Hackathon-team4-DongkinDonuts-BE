@@ -1,6 +1,7 @@
 import uuid
 from datetime import timedelta
 
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -62,6 +63,41 @@ class ContextApiTests(APITestCase):
         self.assertEqual(
             list(activity_plan.activity_tag_links.values_list("activity_tag_id", flat=True)),
             [self.activity_tag.code],
+        )
+
+    def test_current_next_activity_plan_returns_unexpired_plan(self):
+        user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        snapshot = UserContextSnapshot.objects.create(
+            user=user,
+            service_date=today_for_user(user),
+        )
+        UserContextSnapshotState.objects.create(
+            context_snapshot=snapshot,
+            state=self.state,
+            priority=1,
+        )
+        expired_plan = NextActivityPlan.objects.create(
+            user=snapshot.user,
+            context_snapshot=snapshot,
+            service_date=snapshot.service_date,
+            expected_activity_minutes=1,
+        )
+        expired_plan.created_at = timezone.now() - timedelta(minutes=5)
+        expired_plan.save(update_fields=["created_at"])
+        current_plan = NextActivityPlan.objects.create(
+            user=snapshot.user,
+            context_snapshot=snapshot,
+            service_date=snapshot.service_date,
+            expected_activity_minutes=90,
+        )
+
+        response = self.client.get("/api/v1/context/next-activity-plans/current/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"]["id"], str(current_plan.id))
+        self.assertEqual(
+            response.data["data"]["context_snapshot_detail"]["state_options"],
+            [self.state.code],
         )
 
 

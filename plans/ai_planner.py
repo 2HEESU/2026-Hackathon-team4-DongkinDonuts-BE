@@ -1,6 +1,6 @@
 import json
+import random
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
@@ -15,9 +15,8 @@ from routines.models import ActivityType, RoutineInstance, RoutineInstanceStatus
 from sessions_app.models import Session, SessionFeedback
 
 from .models import AIInsight, AIPlanRun, InsightType
-from .openai_client import create_structured_response
 from .services import (
-    build_policy_recommended_times,
+    build_policy_recommended_slots,
     create_or_replace_today_plan,
     get_today_pc_usage_patterns,
     recommend_next_reset_time,
@@ -32,7 +31,30 @@ STAGE_SEQUENCE = {
 }
 
 COMMON_STAGE_TYPES = [StageType.BRAIN_WAKE, StageType.BRAIN_RESET]
-RECENT_COMMON_ACTIVITY_LIMIT = 10
+POLICY_GENERATOR_NAME = "server_policy"
+WAKE_ACTIVITY_CODE = "WAKE_HAND_ROUTINE"
+RESET_ACTIVITY_CODE = "RESET_BREATH"
+RANDOM_SHIFT_SENTINEL = "__RANDOM_PREPARED_SHIFT__"
+STATE_SHIFT_ACTIVITY_CODES = {
+    "EYE_TIRED": ["SHIFT_EYE_RELAX", "SHIFT_EYE_TRACKING"],
+    "eye_tired": ["SHIFT_EYE_RELAX", "SHIFT_EYE_TRACKING"],
+    "BODY_STIFF": ["SHIFT_BODY_STRETCH", "SHIFT_SHOULDER_PMR"],
+    "neck_shoulder_stiff": ["SHIFT_BODY_STRETCH", "SHIFT_SHOULDER_PMR"],
+    "LOW_FOCUS": ["SHIFT_FOCUS_SWITCH"],
+    "cant_focus": ["SHIFT_FOCUS_SWITCH"],
+    "SLEEPY": ["SHIFT_DROWSY_WAKE"],
+    "drowsy_foggy": ["SHIFT_DROWSY_WAKE"],
+    "OKAY": RANDOM_SHIFT_SENTINEL,
+    "still_okay": RANDOM_SHIFT_SENTINEL,
+}
+RANDOM_PREPARED_SHIFT_ACTIVITY_CODES = [
+    "SHIFT_EYE_RELAX",
+    "SHIFT_EYE_TRACKING",
+    "SHIFT_BODY_STRETCH",
+    "SHIFT_SHOULDER_PMR",
+    "SHIFT_FOCUS_SWITCH",
+    "SHIFT_DROWSY_WAKE",
+]
 
 RECOVERY_PLAN_SCHEMA = {
     "name": "brainfit_recovery_plan",
@@ -46,7 +68,7 @@ RECOVERY_PLAN_SCHEMA = {
             "slots": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 6,
+                "maxItems": 12,
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
@@ -54,7 +76,7 @@ RECOVERY_PLAN_SCHEMA = {
                         "recommended_at",
                         "interval_minutes",
                         "reason",
-                        "shift_recommendation",
+                        "shift_recommendations",
                     ],
                     "properties": {
                         "recommended_at": {
@@ -67,31 +89,36 @@ RECOVERY_PLAN_SCHEMA = {
                             "maximum": 240,
                         },
                         "reason": {"type": "string"},
-                        "shift_recommendation": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": [
-                                "activity_code",
-                                "difficulty_level",
-                                "planned_duration_sec",
-                                "reason",
-                            ],
-                            "properties": {
-                                "activity_code": {
-                                    "type": "string",
-                                    "description": "shift_activity_catalog에 있는 Brain Shift activity code",
+                        "shift_recommendations": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 2,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": [
+                                    "activity_code",
+                                    "difficulty_level",
+                                    "planned_duration_sec",
+                                    "reason",
+                                ],
+                                "properties": {
+                                    "activity_code": {
+                                        "type": "string",
+                                        "description": "shift_activity_catalog에 있는 Brain Shift activity code",
+                                    },
+                                    "difficulty_level": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 5,
+                                    },
+                                    "planned_duration_sec": {
+                                        "type": "integer",
+                                        "minimum": 10,
+                                        "maximum": 600,
+                                    },
+                                    "reason": {"type": "string"},
                                 },
-                                "difficulty_level": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "maximum": 5,
-                                },
-                                "planned_duration_sec": {
-                                    "type": "integer",
-                                    "minimum": 10,
-                                    "maximum": 600,
-                                },
-                                "reason": {"type": "string"},
                             },
                         },
                     },
@@ -133,7 +160,7 @@ SYSTEM_PROMPT = """
 함께 보고 오늘의 회복 세션 추천 시간과 Brain Shift 맞춤 활동을 만든다.
 
 규칙:
-- 하나의 회복 세션은 서버에서 항상 Brain Wake → Brain Shift → Brain Reset 3단계로 생성된다.
+- 하나의 회복 세션은 서버에서 항상 Brain Wake → Brain Shift 1~2개 → Brain Reset 순서로 생성된다.
 - Brain Wake와 Brain Reset은 모든 상태에서 공통으로 제공되며 서버가 선택한다.
 - 개인화는 Brain Shift에만 적용한다. shift_recommendation은 반드시 shift_activity_catalog에 있는
   activity_code 중 하나를 골라야 한다.
@@ -203,6 +230,7 @@ def _serialize_context_snapshot(context_snapshot):
 
 
 def _serialize_next_activity_plan(next_activity_plan):
+    attached_snapshot = next_activity_plan.context_snapshot
     return {
         "id": str(next_activity_plan.id),
         "service_date": str(next_activity_plan.service_date),
@@ -215,6 +243,9 @@ def _serialize_next_activity_plan(next_activity_plan):
             }
             for link in next_activity_plan.activity_tag_links.select_related("activity_tag")
         ],
+        "attached_context_snapshot": (
+            _serialize_context_snapshot(attached_snapshot) if attached_snapshot else None
+        ),
         "created_at": _isoformat(next_activity_plan.created_at),
     }
 
@@ -320,24 +351,76 @@ def _context_state_codes(context_snapshot):
     return list(context_snapshot.state_links.order_by("priority").values_list("state_id", flat=True))
 
 
-def _shift_activities_for_context(context_snapshot):
-    state_codes = _context_state_codes(context_snapshot)
+def _combined_state_codes(context_snapshot, next_activity_plan=None):
+    state_codes = []
+
+    for code in _context_state_codes(context_snapshot):
+        if code not in state_codes:
+            state_codes.append(code)
+
+    attached_snapshot = getattr(next_activity_plan, "context_snapshot", None)
+    if attached_snapshot is not None and attached_snapshot.id != context_snapshot.id:
+        for code in _context_state_codes(attached_snapshot):
+            if code not in state_codes:
+                state_codes.append(code)
+
+    return state_codes
+
+
+def _shift_activities_for_context(context_snapshot, next_activity_plan=None):
+    state_codes = _combined_state_codes(context_snapshot, next_activity_plan)
     queryset = ActivityType.objects.filter(is_active=True, stage_type=StageType.BRAIN_SHIFT)
+    random_requested = False
+
+    for state_code in state_codes:
+        mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
+        if mapped_codes is None:
+            continue
+        if mapped_codes == RANDOM_SHIFT_SENTINEL:
+            random_requested = True
+            continue
+
+        activities = list(
+            queryset.filter(code__in=mapped_codes).order_by("code")
+        )
+        by_code = {activity.code: activity for activity in activities}
+        ordered = [
+            by_code[code]
+            for code in mapped_codes
+            if code in by_code
+        ]
+        if ordered:
+            return ordered
+
+    if random_requested:
+        activities = list(
+            queryset.filter(code__in=RANDOM_PREPARED_SHIFT_ACTIVITY_CODES)
+        )
+        by_code = {activity.code: activity for activity in activities}
+        return [
+            by_code[code]
+            for code in RANDOM_PREPARED_SHIFT_ACTIVITY_CODES
+            if code in by_code
+        ]
+
     if state_codes:
         activities = list(queryset.filter(target_state_id__in=state_codes))
         if activities:
             priority = {code: index for index, code in enumerate(state_codes)}
             return sorted(activities, key=lambda activity: (priority.get(activity.target_state_id, 999), activity.code))
-    return list(queryset.filter(target_state__isnull=True).order_by("code"))
+    return list(queryset.filter(code__in=RANDOM_PREPARED_SHIFT_ACTIVITY_CODES).order_by("code"))
 
 
-def _serialize_shift_activity_catalog(context_snapshot):
-    return [_serialize_activity(activity) for activity in _shift_activities_for_context(context_snapshot)]
+def _serialize_shift_activity_catalog(context_snapshot, next_activity_plan):
+    return [
+        _serialize_activity(activity)
+        for activity in _shift_activities_for_context(context_snapshot, next_activity_plan)
+    ]
 
 
 def build_ai_input_snapshot(user, context_snapshot, next_activity_plan):
     has_today_pattern = get_today_pc_usage_patterns(user).exists()
-    mode = "WEEK_PATTERN_BATCH" if has_today_pattern else "SEQUENTIAL_NEXT_ONLY"
+    mode = "SNAPSHOT_AND_FREQUENCY" if has_today_pattern else "SNAPSHOT_ACTIVITY_WINDOW"
     return {
         "plan_date": str(today_for_user(user)),
         "current_time": _isoformat(timezone.now()),
@@ -352,7 +435,7 @@ def build_ai_input_snapshot(user, context_snapshot, next_activity_plan):
         "pc_usage_analysis": analyze_pc_usage_patterns(user),
         "time_policy": recovery_time_policy_for_context(context_snapshot),
         "activity_catalog": _serialize_activity_catalog(),
-        "shift_activity_catalog": _serialize_shift_activity_catalog(context_snapshot),
+        "shift_activity_catalog": _serialize_shift_activity_catalog(context_snapshot, next_activity_plan),
         "routine_generation_policy": {
             "fixed_stage_order": [StageType.BRAIN_WAKE, StageType.BRAIN_SHIFT, StageType.BRAIN_RESET],
             "personalized_stage": StageType.BRAIN_SHIFT,
@@ -415,29 +498,156 @@ def _time_policy_reason(policy, raw_reason=None):
     return base_reason
 
 
+def _coerce_shift_recommendations(raw_slot):
+    recommendations = raw_slot.get("shift_recommendations")
+    if isinstance(recommendations, list):
+        return [item for item in recommendations if isinstance(item, dict)][:2]
+
+    legacy_recommendation = raw_slot.get("shift_recommendation")
+    if isinstance(legacy_recommendation, dict):
+        return [legacy_recommendation]
+
+    return [{}]
+
+
+def _policy_summary(input_snapshot):
+    state_labels = [
+        item["label"]
+        for item in input_snapshot["context_snapshot"]["state_options"]
+    ]
+    activity_names = [
+        item["name"]
+        for item in input_snapshot["next_activity_plan"]["activity_tags"]
+    ]
+
+    state_text = ", ".join(state_labels) if state_labels else "현재 상태"
+    activity_text = ", ".join(activity_names) if activity_names else "다음 활동"
+    interval = input_snapshot["time_policy"]["interval_minutes"]
+
+    return (
+        f"{state_text}와 {activity_text} 정보를 바탕으로 "
+        f"{interval}분 간격의 회복 계획을 생성했습니다."
+    )
+
+
+def _policy_insights(input_snapshot):
+    insights = []
+
+    if input_snapshot["pc_usage_patterns"]:
+        insights.append(
+            {
+                "insight_type": InsightType.DATA_INSIGHT,
+                "body": "오늘 PC 사용 패턴이 있는 시간대 안에 회복 알림을 배치했습니다.",
+                "data_sources": [
+                    "pc_usage_patterns",
+                    "pc_usage_analysis",
+                    "time_policy",
+                ],
+            }
+        )
+
+    if input_snapshot["previous_sessions"]:
+        insights.append(
+            {
+                "insight_type": InsightType.DATA_INSIGHT,
+                "body": "최근 회복 세션을 자주 수행한 시간대도 빈도 기반 알림 후보로 반영했습니다.",
+                "data_sources": [
+                    "previous_sessions",
+                    "time_policy",
+                ],
+            }
+        )
+
+    return insights
+
+
+def _policy_shift_recommendations(context_snapshot, next_activity_plan):
+    recommendations = []
+    state_defaults = _state_default_difficulty_map(
+        context_snapshot,
+        next_activity_plan,
+    )
+    activities = _shift_activities_for_context(
+        context_snapshot,
+        next_activity_plan,
+    )
+    if any(
+        STATE_SHIFT_ACTIVITY_CODES.get(code) == RANDOM_SHIFT_SENTINEL
+        for code in _combined_state_codes(context_snapshot, next_activity_plan)
+    ) and activities:
+        activities = [random.choice(activities)]
+
+    for activity in activities[:2]:
+        recommendations.append(
+            {
+                "activity_code": activity.code,
+                "difficulty_level": _difficulty_for_activity(
+                    activity,
+                    default_difficulty=state_defaults.get(
+                        activity.target_state_id,
+                        activity.min_difficulty,
+                    ),
+                ),
+                "planned_duration_sec": activity.default_duration_sec,
+                "reason": (
+                    activity.purpose
+                    or "현재 상태에 맞는 Brain Shift 활동입니다."
+                ),
+            }
+        )
+
+    return recommendations or [{}]
+
+
+def build_policy_output(user, context_snapshot, next_activity_plan, input_snapshot):
+    policy = recovery_time_policy_for_context(context_snapshot)
+    recommended_slots = build_policy_recommended_slots(
+        user=user,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        base_time=timezone.now().replace(microsecond=0),
+    )
+
+    return {
+        "summary": _policy_summary(input_snapshot),
+        "slots": [
+            {
+                "recommended_at": _isoformat(policy_slot["recommended_at"]),
+                "interval_minutes": policy["interval_minutes"],
+                "reason": policy_slot["reason"],
+                "shift_recommendations": _policy_shift_recommendations(
+                    context_snapshot,
+                    next_activity_plan,
+                ),
+            }
+            for policy_slot in recommended_slots
+        ],
+        "insights": _policy_insights(input_snapshot),
+    }
+
+
 def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan):
     now = timezone.now().replace(microsecond=0)
-    has_today_pattern = get_today_pc_usage_patterns(user).exists()
-    max_slots = 6 if has_today_pattern else 1
     policy = recovery_time_policy_for_context(context_snapshot)
-    policy_times = build_policy_recommended_times(
+    policy_slots = build_policy_recommended_slots(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         base_time=now,
-        max_slots=max_slots,
     )
     raw_slots = ai_output.get("slots", [])
     normalized = []
 
-    for index, recommended_at in enumerate(policy_times):
+    for index, policy_slot in enumerate(policy_slots):
         raw_slot = raw_slots[index] if index < len(raw_slots) else {}
         normalized.append(
             {
-                "recommended_at": recommended_at,
+                "recommended_at": policy_slot["recommended_at"],
                 "interval_minutes": policy["interval_minutes"],
-                "reason": _time_policy_reason(policy, raw_slot.get("reason")),
-                "shift_recommendation": raw_slot.get("shift_recommendation") or {},
+                "notification_basis": policy_slot["notification_basis"],
+                "reason": _time_policy_reason(policy, raw_slot.get("reason") or policy_slot["reason"]),
+                "data_sources": policy_slot["data_sources"],
+                "shift_recommendations": _coerce_shift_recommendations(raw_slot),
             }
         )
 
@@ -450,13 +660,15 @@ def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan):
                     context_snapshot=context_snapshot,
                 ).replace(microsecond=0),
                 "interval_minutes": policy["interval_minutes"],
-                "reason": _time_policy_reason(policy, "AI 응답에 유효한 추천 시간이 없어 보정했습니다."),
-                "shift_recommendation": {},
+                "notification_basis": "SNAPSHOT",
+                "reason": _time_policy_reason(policy, "정책 결과에 유효한 추천 시간이 없어 보정했습니다."),
+                "data_sources": ["context_snapshot", "next_activity_plan", "time_policy"],
+                "shift_recommendations": [{}],
             }
         )
 
     normalized.sort(key=lambda item: item["recommended_at"])
-    return normalized[:max_slots]
+    return normalized
 
 
 def _create_plan_insights(plan, ai_output):
@@ -466,7 +678,11 @@ def _create_plan_insights(plan, ai_output):
             recovery_plan=plan,
             insight_type=InsightType.RECOMMENDATION_REASON,
             body=summary,
-            data_sources_json=["llm_summary"],
+            data_sources_json=[
+                "context_snapshot",
+                "next_activity_plan",
+                "time_policy",
+            ],
         )
 
     for insight in ai_output.get("insights", []):
@@ -484,7 +700,7 @@ def _create_plan_insights(plan, ai_output):
         )
 
 
-def _create_slot_insight(slot, reason):
+def _create_slot_insight(slot, reason, data_sources=None):
     if not reason:
         return
     AIInsight.objects.create(
@@ -492,7 +708,7 @@ def _create_slot_insight(slot, reason):
         recovery_slot=slot,
         insight_type=InsightType.RECOMMENDATION_REASON,
         body=reason,
-        data_sources_json=["llm_slot_reason"],
+        data_sources_json=data_sources or ["time_policy"],
     )
 
 
@@ -503,45 +719,35 @@ def _active_stage_activities(stage_type):
     return activities
 
 
-def _recent_activity_codes(user, stage_type):
-    return list(
-        Session.objects.filter(user=user, activity__stage_type=stage_type)
-        .order_by("-started_at")
-        .values_list("activity_id", flat=True)[:RECENT_COMMON_ACTIVITY_LIMIT]
-    )
-
-
-def _select_common_activity(*, user, stage_type, used_codes=None, avoid_recent=False):
-    used_codes = used_codes if used_codes is not None else set()
-    activities = _active_stage_activities(stage_type)
-    recent_codes = set(_recent_activity_codes(user, stage_type)) if avoid_recent else set()
-    candidates = [
-        activity
-        for activity in activities
-        if activity.code not in used_codes and activity.code not in recent_codes
-    ]
-    if not candidates:
-        candidates = [activity for activity in activities if activity.code not in used_codes]
-    if not candidates:
-        candidates = activities
-
-    activity = candidates[0]
-    used_codes.add(activity.code)
+def _activity_by_code(activity_code, stage_type):
+    activity = ActivityType.objects.filter(
+        code=activity_code,
+        stage_type=stage_type,
+        is_active=True,
+    ).first()
+    if activity is None:
+        raise ValidationError(f"{activity_code} 활동 카탈로그가 필요합니다.")
     return activity
 
 
-def _validate_recovery_activity_catalog(context_snapshot):
-    _active_stage_activities(StageType.BRAIN_WAKE)
-    _active_stage_activities(StageType.BRAIN_RESET)
-    if not _shift_activities_for_context(context_snapshot):
+def _validate_recovery_activity_catalog(context_snapshot, next_activity_plan):
+    _activity_by_code(WAKE_ACTIVITY_CODE, StageType.BRAIN_WAKE)
+    _activity_by_code(RESET_ACTIVITY_CODE, StageType.BRAIN_RESET)
+    if not _shift_activities_for_context(context_snapshot, next_activity_plan):
         raise ValidationError("현재 상태에 맞는 Brain Shift 활동 카탈로그가 필요합니다.")
 
 
-def _state_default_difficulty_map(context_snapshot):
-    return {
-        link.state_id: link.state.default_difficulty
-        for link in context_snapshot.state_links.select_related("state")
-    }
+def _state_default_difficulty_map(context_snapshot, next_activity_plan=None):
+    mapping = {}
+    snapshots = [context_snapshot]
+    attached_snapshot = getattr(next_activity_plan, "context_snapshot", None)
+    if attached_snapshot is not None and attached_snapshot.id != context_snapshot.id:
+        snapshots.append(attached_snapshot)
+
+    for snapshot in snapshots:
+        for link in snapshot.state_links.select_related("state").order_by("priority"):
+            mapping.setdefault(link.state_id, link.state.default_difficulty)
+    return mapping
 
 
 def _difficulty_for_activity(activity, requested_difficulty=None, default_difficulty=None):
@@ -562,23 +768,30 @@ def _duration_for_activity(activity, requested_duration=None):
     )
 
 
-def _select_shift_activity(context_snapshot, recommendation):
-    activities = _shift_activities_for_context(context_snapshot)
+def _select_shift_activity(context_snapshot, next_activity_plan, recommendation, used_codes):
+    activities = _shift_activities_for_context(context_snapshot, next_activity_plan)
     if not activities:
         raise ValidationError("현재 상태에 맞는 Brain Shift 활동 카탈로그가 필요합니다.")
 
     activity_by_code = {activity.code: activity for activity in activities}
     requested_activity = activity_by_code.get(recommendation.get("activity_code"))
-    activity = requested_activity or activities[0]
+    if requested_activity is not None and requested_activity.code not in used_codes:
+        activity = requested_activity
+    else:
+        candidates = [item for item in activities if item.code not in used_codes]
+        if not candidates and used_codes:
+            return None
+        activity = candidates[0] if candidates else activities[0]
+    used_codes.add(activity.code)
 
-    state_defaults = _state_default_difficulty_map(context_snapshot)
+    state_defaults = _state_default_difficulty_map(context_snapshot, next_activity_plan)
     default_difficulty = state_defaults.get(activity.target_state_id, activity.min_difficulty)
-    if requested_activity:
+    if requested_activity is not None and requested_activity.code == activity.code:
         reason = recommendation.get("reason") or "현재 상태에 맞는 Brain Shift 활동입니다."
-        data_sources = ["llm_shift_reason"]
+        data_sources = ["context_snapshot", "activity_catalog"]
     else:
         reason = "현재 상태에 맞는 Brain Shift 활동으로 보정했습니다."
-        data_sources = ["server_shift_fallback"]
+        data_sources = ["context_snapshot", "activity_catalog"]
 
     return {
         "activity": activity,
@@ -594,16 +807,11 @@ def _select_shift_activity(context_snapshot, recommendation):
     }
 
 
-def _common_routine_spec(*, user, stage_type, used_codes, avoid_recent):
-    activity = _select_common_activity(
-        user=user,
-        stage_type=stage_type,
-        used_codes=used_codes,
-        avoid_recent=avoid_recent,
-    )
+def _common_routine_spec(*, activity_code, stage_type, sequence_no):
+    activity = _activity_by_code(activity_code, stage_type)
     return {
         "activity": activity,
-        "sequence_no": STAGE_SEQUENCE[stage_type],
+        "sequence_no": sequence_no,
         "difficulty_level": _difficulty_for_activity(activity),
         "planned_duration_sec": activity.default_duration_sec,
         "reason": "",
@@ -611,20 +819,43 @@ def _common_routine_spec(*, user, stage_type, used_codes, avoid_recent):
     }
 
 
-def _create_routine_instances(slot, context_snapshot, shift_recommendation, used_common_codes):
+def _create_routine_instances(slot, context_snapshot, next_activity_plan, shift_recommendations):
+    used_shift_codes = set()
+    shift_specs = []
+    for recommendation in (shift_recommendations or [{}])[:2]:
+        spec = _select_shift_activity(
+            context_snapshot,
+            next_activity_plan,
+            recommendation,
+            used_shift_codes,
+        )
+        if spec is not None:
+            shift_specs.append(spec)
+
+    if not shift_specs:
+        fallback_spec = _select_shift_activity(
+            context_snapshot,
+            next_activity_plan,
+            {},
+            used_shift_codes,
+        )
+        if fallback_spec is not None:
+            shift_specs.append(fallback_spec)
+
+    for index, spec in enumerate(shift_specs):
+        spec["sequence_no"] = index + 2
+
     routine_specs = [
         _common_routine_spec(
-            user=slot.recovery_plan.user,
+            activity_code=WAKE_ACTIVITY_CODE,
             stage_type=StageType.BRAIN_WAKE,
-            used_codes=used_common_codes[StageType.BRAIN_WAKE],
-            avoid_recent=True,
+            sequence_no=1,
         ),
-        _select_shift_activity(context_snapshot, shift_recommendation),
+        *shift_specs,
         _common_routine_spec(
-            user=slot.recovery_plan.user,
+            activity_code=RESET_ACTIVITY_CODE,
             stage_type=StageType.BRAIN_RESET,
-            used_codes=used_common_codes[StageType.BRAIN_RESET],
-            avoid_recent=False,
+            sequence_no=len(shift_specs) + 2,
         ),
     ]
 
@@ -665,7 +896,7 @@ def _persist_ai_plan(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
-        model_name=settings.OPENAI_MODEL,
+        model_name=POLICY_GENERATOR_NAME,
         input_snapshot_json=input_snapshot,
         output_snapshot_json={"parsed": ai_output, "raw_response": raw_response},
     )
@@ -673,23 +904,28 @@ def _persist_ai_plan(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
-        recommended_times=[slot["recommended_at"] for slot in normalized_slots],
+        recommended_slots=[
+            {
+                "recommended_at": slot["recommended_at"],
+                "notification_basis": slot["notification_basis"],
+            }
+            for slot in normalized_slots
+        ],
         notification_enabled=notification_enabled,
         ai_plan_run=ai_run,
     )
     _create_plan_insights(plan, ai_output)
 
     slots = list(plan.slots.order_by("sequence_no"))
-    used_common_codes = {stage_type: set() for stage_type in COMMON_STAGE_TYPES}
     for slot, ai_slot in zip(slots, normalized_slots):
         slot.interval_minutes = ai_slot["interval_minutes"]
         slot.save(update_fields=["interval_minutes", "updated_at"])
-        _create_slot_insight(slot, ai_slot["reason"])
+        _create_slot_insight(slot, ai_slot["reason"], ai_slot.get("data_sources"))
         _create_routine_instances(
             slot,
             context_snapshot,
-            ai_slot["shift_recommendation"],
-            used_common_codes,
+            next_activity_plan,
+            ai_slot["shift_recommendations"],
         )
 
     return plan
@@ -707,13 +943,18 @@ def generate_ai_recovery_plan(
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
     )
-    _validate_recovery_activity_catalog(context_snapshot)
+    _validate_recovery_activity_catalog(context_snapshot, next_activity_plan)
     input_snapshot = build_ai_input_snapshot(user, context_snapshot, next_activity_plan)
-    ai_output, raw_response = create_structured_response(
-        input_messages=build_input_messages(input_snapshot),
-        schema=RECOVERY_PLAN_SCHEMA,
-        model=settings.OPENAI_MODEL,
+    ai_output = build_policy_output(
+        user,
+        context_snapshot,
+        next_activity_plan,
+        input_snapshot,
     )
+    raw_response = {
+        "generator": POLICY_GENERATOR_NAME,
+        "external_api_called": False,
+    }
     normalized_slots = normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan)
     return _persist_ai_plan(
         user=user,

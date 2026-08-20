@@ -8,6 +8,8 @@ from .views import (
     RecoveryPlanTodayNextSlotView,
     RecoveryPlanTodayView,
     RecoverySlotCancelView,
+    RecoverySlotCancelBeforeView,
+    RecoverySlotConsumeSnapshotView,
     RecoverySlotListView,
     RecoverySlotDetailView,
     RecoverySlotFeedbackView,
@@ -43,6 +45,16 @@ urlpatterns = [
     ),
     path("recovery-slots/", RecoverySlotListView.as_view(), name="recovery-slot-list"),
     path("recovery-slots/today/", RecoverySlotTodayListView.as_view(), name="recovery-slot-today-list"),
+    path(
+        "recovery-slots/cancel-before/",
+        RecoverySlotCancelBeforeView.as_view(),
+        name="recovery-slot-cancel-before",
+    ),
+    path(
+        "recovery-slots/consume-nearest-snapshot/",
+        RecoverySlotConsumeSnapshotView.as_view(),
+        name="recovery-slot-consume-nearest-snapshot",
+    ),
     path("recovery-slots/next/", RecoverySlotNextView.as_view(), name="recovery-slot-next"),
     path(
         "recovery-slots/next-reset-time/",
