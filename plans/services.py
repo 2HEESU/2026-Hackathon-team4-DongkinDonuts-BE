@@ -434,6 +434,18 @@ def _matches_pc_usage_pattern(value, pattern_keys):
     return (WEEKDAY_TO_DAY_OF_WEEK[local_value.weekday()], local_value.hour) in pattern_keys
 
 
+def is_within_pc_usage_pattern(user, value):
+    """
+    value(datetime)가 사용자의 PC 사용 패턴 블록(요일+시간대) 안에 들어가는지 확인한다.
+    AI가 자율적으로 정한 recommended_at을 서버에서 검증할 때 씀 — 패턴을 하나도
+    안 넣은 사용자는 애초에 검증할 블록이 없으므로 항상 False.
+    """
+    pattern_keys = _pc_usage_pattern_hour_keys(user)
+    if not pattern_keys:
+        return False
+    return _matches_pc_usage_pattern(value, pattern_keys)
+
+
 def _today_pattern_hours(user):
     today_day_of_week = today_day_of_week_for_user(user)
     return set(

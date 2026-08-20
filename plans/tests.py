@@ -469,7 +469,16 @@ class RecoveryPlanServiceTests(TestCase):
         )
 
 
+@override_settings(OPENAI_API_KEY="")
 class RecoveryPlanApiTests(APITestCase):
+    """
+    기본적으로 OPENAI_API_KEY를 비워서 create_structured_response를 안 거치는
+    테스트는 전부 정책 엔진(폴백) 경로로만 돈다 — .env에 실제 키가 들어있어도
+    테스트가 실제 OpenAI 네트워크 호출을 하지 않도록 하는 안전장치. 실제 LLM
+    경로를 검증하는 테스트는 메서드 단위로 OPENAI_API_KEY를 다시 채우고
+    create_structured_response를 목(mock)으로 대체한다.
+    """
+
     def setUp(self):
         self.device_code = uuid.uuid4()
         self.client.credentials(HTTP_X_DEVICE_CODE=str(self.device_code))
@@ -619,6 +628,148 @@ class RecoveryPlanApiTests(APITestCase):
         far_slot.refresh_from_db()
         self.assertEqual(nearby_slot.status, SlotStatus.CANCELED)
         self.assertEqual(far_slot.status, SlotStatus.RECOMMENDED)
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    @patch("plans.ai_planner.create_structured_response")
+    def test_ai_generate_trusts_llm_slot_count_and_drops_out_of_pattern_slots(
+        self, mock_create_structured_response
+    ):
+        """
+        LLM이 (정책 엔진이라면 절대 안 나올) 3개의 슬롯을 자유롭게 제안하면, 그중
+        PC 사용 패턴 밖 시각인 1개는 서버가 걸러내고 패턴 안에 있는 2개만 실제로
+        생성돼야 한다 — "AI 자율 판단"이 진짜로 개수/시각을 결정한다는 걸 증명.
+        """
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+
+        user = User.objects.get(id=self.device_code)
+        today_day = today_day_of_week_for_user(user)
+        # PC 사용 패턴: 14시, 15시만 사용 중 — 16시는 패턴 밖.
+        PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=14, is_used=True)
+        PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=15, is_used=True)
+
+        fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
+        in_pattern_first = fixed_now.replace(hour=14, minute=10)
+        in_pattern_second = fixed_now.replace(hour=15, minute=20)
+        out_of_pattern = fixed_now.replace(hour=16, minute=0)
+
+        shift = ActivityType.objects.create(
+            code="shift_neck",
+            stage_type=StageType.BRAIN_SHIFT,
+            target_state=self.state,
+            name="목 이완",
+            default_duration_sec=90,
+        )
+
+        def shift_recommendation(reason):
+            return [
+                {
+                    "activity_code": shift.code,
+                    "difficulty_level": 3,
+                    "planned_duration_sec": 90,
+                    "reason": reason,
+                }
+            ]
+
+        mock_create_structured_response.return_value = (
+            {
+                "summary": "PC 사용 밀집 구간을 고려해 3개의 슬롯을 제안합니다.",
+                "slots": [
+                    {
+                        "recommended_at": in_pattern_first.isoformat(),
+                        "interval_minutes": 40,
+                        "reason": "첫 번째 밀집 구간",
+                        "shift_recommendations": shift_recommendation("목 뻐근함을 줄입니다."),
+                    },
+                    {
+                        "recommended_at": in_pattern_second.isoformat(),
+                        "interval_minutes": 30,
+                        "reason": "두 번째 밀집 구간",
+                        "shift_recommendations": shift_recommendation("다시 한 번 이완합니다."),
+                    },
+                    {
+                        # PC 사용 패턴 밖(16시) — 서버가 걸러내야 함
+                        "recommended_at": out_of_pattern.isoformat(),
+                        "interval_minutes": 30,
+                        "reason": "패턴 밖 슬롯(걸러져야 함)",
+                        "shift_recommendations": shift_recommendation("걸러짐"),
+                    },
+                ],
+                "insights": [],
+            },
+            {"id": "resp_mock"},
+        )
+
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(response.data["data"]["slots"]), 2)
+
+        plan_id = response.data["data"]["id"]
+        slot_hours = sorted(
+            RecoverySlot.objects.filter(recovery_plan_id=plan_id).values_list(
+                "recommended_at__hour", flat=True
+            )
+        )
+        self.assertEqual(slot_hours, [14, 15])
+
+        ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
+        self.assertTrue(ai_run.model_name.startswith("openai:"))
+
+    def test_ai_generate_falls_back_to_policy_engine_when_openai_key_missing(self):
+        """
+        OPENAI_API_KEY가 없으면(클래스 기본값) create_structured_response 호출 없이
+        곧바로 정책 엔진으로 생성돼야 한다 — LLM 장애/미설정이 회복 계획 생성
+        자체를 막지 않는다는 안전장치 확인.
+        """
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 45,
+            },
+            format="json",
+        )
+
+        response = self.client.post(
+            "/api/v1/plans/recovery-plans/today/ai-generate/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "next_activity_plan": activity_plan_response.data["data"]["id"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
+        self.assertEqual(ai_run.model_name, "server_policy")
+        self.assertFalse(ai_run.output_snapshot_json["raw_response"]["external_api_called"])
 
     def test_ai_generate_uses_fixed_wake_shift_groups_and_reset(self):
         eye_state, _ = StateOption.objects.get_or_create(
