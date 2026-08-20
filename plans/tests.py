@@ -893,18 +893,18 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(len(date_response.data["data"]), 3)
 
         history_statuses = {item["id"]: item["history_status"] for item in date_response.data["data"]}
-        self.assertEqual(history_statuses[str(missed_slot.id)], "MISSED")
+        self.assertEqual(history_statuses[str(missed_slot.id)], "UPCOMING")
         self.assertEqual(history_statuses[str(completed_slot.id)], "COMPLETED")
         self.assertEqual(history_statuses[str(upcoming_slot.id)], "UPCOMING")
 
         missed_item = next(item for item in date_response.data["data"] if item["id"] == str(missed_slot.id))
-        self.assertEqual(missed_item["history_status_label"], "미완료")
+        self.assertEqual(missed_item["history_status_label"], "진행 예정")
         self.assertIn("목이 뻐근해요", missed_item["input_summary"])
         self.assertIn("과제", missed_item["input_summary"])
         self.assertIn("45분 예정", missed_item["input_summary"])
         self.assertEqual(missed_item["recommended_routines"][0]["activity"]["code"], "history_neck_shift")
         self.assertEqual(missed_item["recommended_routines"][0]["reason"], "목 긴장을 낮추기 위한 루틴입니다.")
-        self.assertEqual(missed_item["remark"], "연속 사용 전에 짧은 휴식이 필요합니다.")
+        self.assertEqual(missed_item["remark"], "brainfit의 추천 시간")
         self.assertIn("디지털 사용 패턴", missed_item["data_source_summary"]["labels"])
         self.assertIn("디지털 사용 패턴", missed_item["data_notice"])
 

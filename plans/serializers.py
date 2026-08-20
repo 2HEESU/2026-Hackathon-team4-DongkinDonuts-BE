@@ -39,7 +39,6 @@ AI_SOURCE_LABELS = {
 HISTORY_STATUS_LABELS = {
     "COMPLETED": "완료",
     "UPCOMING": "진행 예정",
-    "MISSED": "미완료",
     "IN_PROGRESS": "진행중",
     "CANCELED": "취소",
 }
