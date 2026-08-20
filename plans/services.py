@@ -1198,34 +1198,6 @@ def deactivate_web_push_subscription(*, subscription):
     return subscription
 
 
-@transaction.atomic
-def cleanup_nearby_pattern_notifications_on_entry(*, user, current_time=None, threshold_minutes=30):
-    """
-    [진입 시점 알림 삭제 정책]
-    사용자 서비스 진입 시점(current_time)과 가장 가깝고 && 일정 시간(threshold_minutes) 이상
-    차이 나지 않는 해당 PC 사용 패턴 블록의 빈도 기반 알림들을 CANCELED(삭제/취소) 처리한다.
-    """
-    now = current_time or timezone.now()
-    threshold = timedelta(minutes=threshold_minutes)
-
-    open_slots = RecoverySlot.objects.filter(
-        recovery_plan__user=user,
-        recovery_plan__plan_date=today_for_user(user),
-        status__in=OPEN_SLOT_STATUSES,
-    ).select_related("recovery_plan")
-
-    canceled_slots = []
-    for slot in open_slots:
-        slot_time = slot.effective_time
-        if slot_time and abs((slot_time - now).total_seconds()) <= threshold.total_seconds():
-            slot.status = SlotStatus.CANCELED
-            slot.save(update_fields=["status", "updated_at"])
-            sync_slot_notification(slot)
-            canceled_slots.append(slot)
-
-    return canceled_slots
-
-
 def cancel_nearest_upcoming_pc_usage_block_notifications(*, user, current_time=None):
     """
     [상태 선택 모달로 알림을 직접 설정했을 때의 정리 정책]

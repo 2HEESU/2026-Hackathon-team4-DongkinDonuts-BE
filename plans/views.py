@@ -172,6 +172,13 @@ class RecoverySlotTodayListView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         expire_unanswered_recovery_slots(user=self.request.user)
+        # cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)를
+        # 여기 걸어놨었는데, 이 엔드포인트가 "진짜 진입 시점"에만 불리는 게
+        # 아니라 useRoutineHome 마운트 때마다(=생성 직후 리렌더 때도) 불려서
+        # 방금 막 만든 알림을 스스로 취소해버리는 버그가 있었다 — 제거함.
+        # 진입 시점에 가까운 PC 사용 블록을 정리하는 건 이제
+        # cancel_nearest_upcoming_pc_usage_block_notifications가 정확한
+        # 트리거 시점(모달 생성 성공 직후)에만 맡는다.
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(

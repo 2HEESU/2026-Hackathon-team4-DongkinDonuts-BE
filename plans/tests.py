@@ -653,10 +653,15 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_response.status_code, status.HTTP_200_OK)
         self.assertEqual(history_response.data["data"][0]["id"], slot_id)
 
-    def test_today_slot_list_does_not_cancel_notifications_on_read(self):
+    def test_today_slot_list_does_not_cancel_freshly_created_notifications(self):
         """
-        오늘 슬롯 목록 조회는 화면 렌더링용 read API라서 알림/슬롯 상태를 바꾸면 안 된다.
-        취소는 명시적인 재진입 API에서만 처리한다.
+        cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)는
+        GET /plans/recovery-slots/today/가 "사용자가 진짜로 들어와서 확인하는
+        순간"에만 불리는 게 아니라 useRoutineHome이 마운트될 때마다(=생성 직후
+        페이지가 다시 렌더될 때도) 불려서, 방금 막 생성한 알림의 첫 슬롯이
+        우연히 30분 이내에 있으면 만들어지자마자 스스로 취소해버리는 버그가
+        있었다 — 그래서 이 정리 로직 자체를 뺐다. 오늘 슬롯 조회는 이제
+        기존 슬롯 상태를 그대로 보여줘야 한다(방금 만든 가까운 슬롯도 유지).
         """
         user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
         plan = RecoveryPlan.objects.create(
