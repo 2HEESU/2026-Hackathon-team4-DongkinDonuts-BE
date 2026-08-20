@@ -49,6 +49,7 @@ from .services import (
     build_policy_recommended_slots,
     create_or_replace_today_plan,
     has_today_pc_usage_pattern,
+    recommend_next_reset_time,
     reset_next_activity_and_slot,
     schedule_next_slot_after_completed_slot,
     set_slot_notification,
@@ -125,6 +126,40 @@ class RecoveryPlanServiceTests(TestCase):
         self.assertEqual(second_slot.sequence_no, 3)
         self.assertEqual(second_slot.notification_basis, SlotNotificationBasis.SNAPSHOT)
         self.assertEqual(plan.slots.count(), 3)
+
+    @override_settings(DEMO_MODE=True)
+    def test_demo_mode_uses_seconds_instead_of_minutes(self):
+        """
+        DEMO_MODE=True(현장 시연/촬영용)면 분 단위 정책 대신 초 단위로
+        슬롯이 배치돼야 한다. self.state는 EYE_TIRED라 10초 간격이 기대값
+        (DEMO_MODE_SECONDS_BY_STATE). 레포 기본값은 항상 DEMO_MODE=False라
+        이 테스트가 없어도 평소 동작엔 전혀 영향 없다.
+        """
+        fixed_now = timezone.now().replace(microsecond=0)
+        NextActivityPlan.objects.filter(id=self.next_activity_plan.id).update(
+            created_at=fixed_now,
+            expected_activity_minutes=60,
+        )
+        self.next_activity_plan.refresh_from_db()
+
+        next_reset = recommend_next_reset_time(
+            self.next_activity_plan,
+            base_time=fixed_now,
+            context_snapshot=self.context_snapshot,
+        )
+        self.assertEqual(next_reset, fixed_now + timedelta(seconds=10))
+
+        slots = build_policy_recommended_slots(
+            user=self.user,
+            context_snapshot=self.context_snapshot,
+            next_activity_plan=self.next_activity_plan,
+            base_time=fixed_now,
+            include_frequency_slots=False,
+        )
+        times = [slot["recommended_at"] for slot in slots]
+        self.assertGreaterEqual(len(times), 2)
+        self.assertEqual(times[0], fixed_now + timedelta(seconds=10))
+        self.assertEqual(times[1] - times[0], timedelta(seconds=10))
 
     def test_policy_slots_split_next_activity_duration_by_state_interval(self):
         fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
