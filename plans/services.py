@@ -40,10 +40,11 @@ OPEN_SLOT_STATUSES = [
 ]
 
 RECOVERY_INTERVAL_MINUTES_BY_STATE = {
-    "EYE_TIRED": 20,
-    "BODY_STIFF": 30,
-    "LOW_FOCUS": 45,
-    "SLEEPY": 30,
+    "EYE_TIRED": 20,       # 눈 피로 (20분 법칙)
+    "BODY_STIFF": 30,      # 몸/목/어깨 뻐근 (30분 이완)
+    "SLEEPY": 30,          # 졸림/피곤 (30분 각성)
+    "LOW_FOCUS": 45,       # 집중 저하 (45분 인지 회복)
+    "OKAY": 90,            # 아직 괜찮아요 (90분)
 }
 DEFAULT_RECOVERY_INTERVAL_MINUTES = 45
 MAX_POLICY_RECOMMENDED_TIMES = 12
