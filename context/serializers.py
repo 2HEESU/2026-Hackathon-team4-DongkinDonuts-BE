@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from rest_framework import serializers
 
 from common.models import ActivityTag, StateOption
@@ -109,15 +111,19 @@ class NextActivityPlanSerializer(serializers.ModelSerializer):
     """NextActivityPlan 조회용. activity_tags는 코드 목록으로 보여준다."""
 
     activity_tags = serializers.SerializerMethodField()
+    context_snapshot_detail = serializers.SerializerMethodField()
+    valid_until = serializers.SerializerMethodField()
 
     class Meta:
         model = NextActivityPlan
         fields = [
             "id",
             "context_snapshot",
+            "context_snapshot_detail",
             "service_date",
             "expected_activity_minutes",
             "activity_tags",
+            "valid_until",
             "created_at",
             "updated_at",
         ]
@@ -125,6 +131,16 @@ class NextActivityPlanSerializer(serializers.ModelSerializer):
 
     def get_activity_tags(self, obj):
         return list(obj.activity_tag_links.values_list("activity_tag_id", flat=True))
+
+    def get_context_snapshot_detail(self, obj):
+        if obj.context_snapshot is None:
+            return None
+        return UserContextSnapshotSerializer(obj.context_snapshot).data
+
+    def get_valid_until(self, obj):
+        if obj.expected_activity_minutes is None or obj.created_at is None:
+            return None
+        return obj.created_at + timedelta(minutes=obj.expected_activity_minutes)
 
 
 class NextActivityPlanCreateSerializer(serializers.Serializer):

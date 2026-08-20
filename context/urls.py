@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    CurrentNextActivityPlanView,
     NextActivityPlanCreateView,
     NextActivityPlanTodayView,
     NextActivityPlanUpdateView,
@@ -17,6 +18,7 @@ urlpatterns = [
     path("context-snapshots/", UserContextSnapshotCreateView.as_view(), name="context-snapshot-create"),
     path("context-snapshots/<uuid:pk>/", UserContextSnapshotUpdateView.as_view(), name="context-snapshot-update"),
     path("next-activity-plans/today/", NextActivityPlanTodayView.as_view(), name="next-activity-plan-today"),
+    path("next-activity-plans/current/", CurrentNextActivityPlanView.as_view(), name="next-activity-plan-current"),
     path("next-activity-plans/", NextActivityPlanCreateView.as_view(), name="next-activity-plan-create"),
     path("next-activity-plans/<uuid:pk>/", NextActivityPlanUpdateView.as_view(), name="next-activity-plan-update"),
     path("state-frequency/", StateFrequencyView.as_view(), name="state-frequency"),
