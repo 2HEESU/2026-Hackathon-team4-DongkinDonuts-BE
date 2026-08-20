@@ -482,12 +482,6 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
         if status in ["COMPLETED", "IN_PROGRESS"]:
             return ""
 
-        if status == "MISSED":
-            for insight in obj.insights.all():
-                if insight.insight_type == InsightType.RECOMMENDATION_REASON:
-                    return insight.body
-            return ""
-
         if status == "UPCOMING":
             # 트랙 2: 사용자가 직접 시간을 변경(user_changed_at)했거나 수동 지정(scheduled_at)한 타이머
             if obj.user_changed_at is not None or (
