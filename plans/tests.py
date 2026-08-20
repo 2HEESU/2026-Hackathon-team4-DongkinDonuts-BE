@@ -821,7 +821,9 @@ class RecoveryPlanApiTests(APITestCase):
         겹치는 세션 기록을 잔뜩 갖고 있어도, 빈도 기반(FREQUENCY) 슬롯이 하나도
         섞여 들어가면 안 되고 상태 스냅샷 기반(SNAPSHOT) 슬롯만 나와야 한다.
         """
-        user = User.objects.get(id=self.device_code)
+        user, _ = User.objects.get_or_create(
+            id=self.device_code, defaults={"timezone": "Asia/Seoul"}
+        )
         today_day = today_day_of_week_for_user(user)
         fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
 
@@ -1344,7 +1346,10 @@ class RecoveryPlanApiTests(APITestCase):
             [shift.code, second_shift.code],
         )
         self.assertEqual(ai_run.input_snapshot_json["time_policy"]["interval_minutes"], 45)
-        self.assertEqual(AIInsight.objects.count(), 8)
+        # use_ai_decision을 안 보낸 흐름이라 정책 엔진이 PC 사용 패턴을 참고하지
+        # 않고, "PC 사용 패턴이 있는 시간대 안에 배치했다"는 인사이트도 안 붙는다
+        # (원래 9개 슬롯 인사이트 + summary 인사이트였다면 여기서 1개 빠짐).
+        self.assertEqual(AIInsight.objects.count(), 7)
         self.assertEqual(RoutineInstance.objects.count(), 8)
         created_slots = list(
             RecoverySlot.objects.filter(
