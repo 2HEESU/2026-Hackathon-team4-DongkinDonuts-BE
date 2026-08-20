@@ -40,10 +40,11 @@ OPEN_SLOT_STATUSES = [
 ]
 
 RECOVERY_INTERVAL_MINUTES_BY_STATE = {
-    "EYE_TIRED": 20,
-    "BODY_STIFF": 30,
-    "LOW_FOCUS": 45,
-    "SLEEPY": 30,
+    "EYE_TIRED": 20,       # 눈 피로 (20분 법칙)
+    "BODY_STIFF": 30,      # 몸/목/어깨 뻐근 (30분 이완)
+    "SLEEPY": 30,          # 졸림/피곤 (30분 각성)
+    "LOW_FOCUS": 45,       # 집중 저하 (45분 인지 회복)
+    "OKAY": 90,            # 아직 괜찮아요 (90분)
 }
 DEFAULT_RECOVERY_INTERVAL_MINUTES = 45
 MAX_POLICY_RECOMMENDED_TIMES = 12
@@ -585,8 +586,16 @@ def build_policy_recommended_slots(
     next_activity_plan=None,
     base_time=None,
     max_slots=MAX_POLICY_RECOMMENDED_TIMES,
+    include_frequency_slots=True,
 ):
-    """상태 기반 스냅샷 슬롯과 빈도 기반 슬롯을 함께 계산한다."""
+    """
+    상태 기반 스냅샷 슬롯과(옵션으로) 빈도 기반 슬롯을 함께 계산한다.
+
+    include_frequency_slots=False면 PC 사용 패턴/과거 세션 빈도(digital_state)는
+    아예 참고하지 않고 상태 스냅샷+다음 활동 시간만으로 슬롯을 만든다 — 상태
+    선택 모달("회복 루틴 시작하기" 등)처럼 My Digital State와 완전히 무관해야
+    하는 흐름에서 쓴다.
+    """
 
     base_time = _minute_floor(base_time or timezone.now())
     policy_context = _context_from_inputs(context_snapshot, next_activity_plan)
@@ -610,7 +619,7 @@ def build_policy_recommended_slots(
         )
 
     remaining_slots = max(0, min(MAX_PREVIOUS_SESSION_FREQUENCY_TIMES, max_slots - len(slots_by_time)))
-    if remaining_slots:
+    if include_frequency_slots and remaining_slots:
         for recommended_at in _previous_session_frequency_times(
             user=user,
             base_time=base_time,
