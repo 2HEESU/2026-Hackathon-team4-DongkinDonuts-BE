@@ -596,11 +596,15 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_response.status_code, status.HTTP_200_OK)
         self.assertEqual(history_response.data["data"][0]["id"], slot_id)
 
-    def test_today_slot_list_cancels_pattern_notification_close_to_entry_time(self):
+    def test_today_slot_list_does_not_cancel_freshly_created_notifications(self):
         """
-        오늘 슬롯 목록 조회(=서비스 진입 시점)에서 cleanup_nearby_pattern_notifications_on_entry가
-        같이 돌아서, 지금과 가까운(기본 30분 이내) 빈도 기반 알림은 CANCELED 처리돼야 한다.
-        먼 미래의 슬롯은 그대로 열려있어야 한다.
+        cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)는
+        GET /plans/recovery-slots/today/가 "사용자가 진짜로 들어와서 확인하는
+        순간"에만 불리는 게 아니라 useRoutineHome이 마운트될 때마다(=생성 직후
+        페이지가 다시 렌더될 때도) 불려서, 방금 막 생성한 알림의 첫 슬롯이
+        우연히 30분 이내에 있으면 만들어지자마자 스스로 취소해버리는 버그가
+        있었다 — 그래서 이 정리 로직 자체를 뺐다. 오늘 슬롯 조회는 이제
+        기존 슬롯 상태를 그대로 보여줘야 한다(방금 만든 가까운 슬롯도 유지).
         """
         user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
         plan = RecoveryPlan.objects.create(
@@ -614,20 +618,12 @@ class RecoveryPlanApiTests(APITestCase):
             recommended_at=timezone.now() + timedelta(minutes=10),
             notification_basis=SlotNotificationBasis.FREQUENCY,
         )
-        far_slot = RecoverySlot.objects.create(
-            recovery_plan=plan,
-            sequence_no=2,
-            recommended_at=timezone.now() + timedelta(hours=3),
-            notification_basis=SlotNotificationBasis.FREQUENCY,
-        )
 
         response = self.client.get("/api/v1/plans/recovery-slots/today/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         nearby_slot.refresh_from_db()
-        far_slot.refresh_from_db()
-        self.assertEqual(nearby_slot.status, SlotStatus.CANCELED)
-        self.assertEqual(far_slot.status, SlotStatus.RECOMMENDED)
+        self.assertEqual(nearby_slot.status, SlotStatus.RECOMMENDED)
 
     @override_settings(OPENAI_API_KEY="test-key")
     @patch("plans.ai_planner.create_structured_response")
