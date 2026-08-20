@@ -540,10 +540,13 @@ def _policy_summary(input_snapshot):
     )
 
 
-def _policy_insights(input_snapshot):
+def _policy_insights(input_snapshot, *, include_frequency_slots=True):
     insights = []
 
-    if input_snapshot["pc_usage_patterns"]:
+    # include_frequency_slots=False(My Digital State와 무관한 흐름)일 땐 실제로
+    # PC 사용 패턴/과거 세션을 슬롯 배치에 안 썼으니, 썼다고 오해하게 만드는
+    # 인사이트 문구도 같이 빼야 한다.
+    if include_frequency_slots and input_snapshot["pc_usage_patterns"]:
         insights.append(
             {
                 "insight_type": InsightType.DATA_INSIGHT,
@@ -556,7 +559,7 @@ def _policy_insights(input_snapshot):
             }
         )
 
-    if input_snapshot["previous_sessions"]:
+    if include_frequency_slots and input_snapshot["previous_sessions"]:
         insights.append(
             {
                 "insight_type": InsightType.DATA_INSIGHT,
@@ -609,13 +612,14 @@ def _policy_shift_recommendations(context_snapshot, next_activity_plan):
     return recommendations or [{}]
 
 
-def build_policy_output(user, context_snapshot, next_activity_plan, input_snapshot):
+def build_policy_output(user, context_snapshot, next_activity_plan, input_snapshot, *, include_frequency_slots=True):
     policy = recovery_time_policy_for_context(context_snapshot)
     recommended_slots = build_policy_recommended_slots(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         base_time=timezone.now().replace(microsecond=0),
+        include_frequency_slots=include_frequency_slots,
     )
 
     return {
@@ -632,7 +636,7 @@ def build_policy_output(user, context_snapshot, next_activity_plan, input_snapsh
             }
             for policy_slot in recommended_slots
         ],
-        "insights": _policy_insights(input_snapshot),
+        "insights": _policy_insights(input_snapshot, include_frequency_slots=include_frequency_slots),
     }
 
 
@@ -690,7 +694,15 @@ def _normalize_llm_authored_slots(raw_slots, *, user, now, today, policy):
     return candidates
 
 
-def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan, *, is_ai_generated=False):
+def normalize_ai_slots(
+    ai_output,
+    user,
+    context_snapshot,
+    next_activity_plan,
+    *,
+    is_ai_generated=False,
+    use_ai_decision=False,
+):
     now = timezone.now().replace(microsecond=0)
     policy = recovery_time_policy_for_context(context_snapshot)
     raw_slots = ai_output.get("slots", [])
@@ -709,11 +721,15 @@ def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan, *,
         # 과거 시각이거나 등) 정책 엔진으로 안전하게 폴백한다.
         logger.warning("AI가 반환한 슬롯이 전부 검증에 실패해 정책 엔진으로 폴백합니다.")
 
+    # use_ai_decision=False(My Digital State 흐름이 아님, 예: 상태 선택 모달)면
+    # PC 사용 패턴/과거 세션 빈도는 아예 참고하지 않는다 — 이 흐름은
+    # digital_state와 완전히 무관해야 한다.
     policy_slots = build_policy_recommended_slots(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         base_time=now,
+        include_frequency_slots=use_ai_decision,
     )
     normalized = []
 
@@ -1040,6 +1056,7 @@ def generate_ai_recovery_plan(
         context_snapshot,
         next_activity_plan,
         is_ai_generated=is_ai_generated,
+        use_ai_decision=use_ai_decision,
     )
     return _persist_ai_plan(
         user=user,
@@ -1092,6 +1109,7 @@ def _generate_plan_output(*, user, context_snapshot, next_activity_plan, input_s
         context_snapshot,
         next_activity_plan,
         input_snapshot,
+        include_frequency_slots=use_ai_decision,
     )
     raw_response = {
         "generator": POLICY_GENERATOR_NAME,

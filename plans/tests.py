@@ -814,6 +814,87 @@ class RecoveryPlanApiTests(APITestCase):
         ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
         self.assertEqual(ai_run.model_name, "server_policy")
 
+    def test_ai_generate_ignores_pc_usage_pattern_when_use_ai_decision_omitted(self):
+        """
+        상태 선택 모달 흐름(use_ai_decision 안 보냄)은 PC 사용 패턴/과거 세션
+        빈도(digital_state)와 완전히 무관해야 한다 — 사용자가 PC 패턴과 그와
+        겹치는 세션 기록을 잔뜩 갖고 있어도, 빈도 기반(FREQUENCY) 슬롯이 하나도
+        섞여 들어가면 안 되고 상태 스냅샷 기반(SNAPSHOT) 슬롯만 나와야 한다.
+        """
+        user = User.objects.get(id=self.device_code)
+        today_day = today_day_of_week_for_user(user)
+        fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
+
+        # PC 사용 패턴 + 그 시간대에 몰린 과거 세션 기록(전형적인 빈도 기반 후보)
+        PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=16, is_used=True)
+        shift = ActivityType.objects.create(
+            code="shift_freq_test",
+            stage_type=StageType.BRAIN_SHIFT,
+            target_state=self.state,
+            name="테스트용 이완",
+            default_duration_sec=90,
+        )
+        plan = RecoveryPlan.objects.create(user=user, plan_date=today_for_user(user))
+        slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=1,
+            recommended_at=fixed_now.replace(hour=16, minute=20),
+        )
+        routine = RoutineInstance.objects.create(
+            recovery_slot=slot,
+            activity=shift,
+            sequence_no=1,
+            difficulty_level=1,
+            planned_duration_sec=90,
+        )
+        for weeks_ago, minute in enumerate([10, 30, 50], start=1):
+            started_at = fixed_now.replace(hour=16, minute=minute) - timedelta(days=7 * weeks_ago)
+            Session.objects.create(
+                user=user,
+                recovery_slot=slot,
+                routine_instance=routine,
+                activity=shift,
+                started_at=started_at,
+                ended_at=started_at + timedelta(minutes=2),
+                duration_sec=120,
+                accuracy=100,
+                status=SessionStatus.COMPLETED,
+            )
+
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        plan_id = response.data["data"]["id"]
+        bases = set(
+            RecoverySlot.objects.filter(recovery_plan_id=plan_id).values_list(
+                "notification_basis", flat=True
+            )
+        )
+        self.assertNotIn(SlotNotificationBasis.FREQUENCY, bases)
+
     def test_ai_generate_uses_fixed_wake_shift_groups_and_reset(self):
         eye_state, _ = StateOption.objects.get_or_create(
             code="EYE_TIRED",
