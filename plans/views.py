@@ -16,6 +16,7 @@ from .models import Notification, PlanStatus, RecoveryPlan, RecoverySlot, WebPus
 from .serializers import (
     AIRecoveryPlanGenerateSerializer,
     NotificationSerializer,
+    RecoverySlotCancelBeforeSerializer,
     RecoveryPlanCreateSerializer,
     RecoveryPlanSerializer,
     RecoverySlotCreateSerializer,
@@ -30,11 +31,15 @@ from .serializers import (
     WebPushSubscriptionSerializer,
 )
 from .services import (
+    cancel_next_snapshot_slot_for_reentry,
+    cancel_snapshot_slots_before,
     cancel_slot,
     create_or_replace_today_plan,
     create_recovery_slot,
     deactivate_web_push_subscription,
+    expire_unanswered_recovery_slots,
     get_next_slot_for_user,
+    get_runnable_slot_for_user,
     mark_notification_clicked,
     notification_user_filter,
     reset_next_activity_and_slot,
@@ -75,7 +80,7 @@ class RecoveryPlanTodayView(EnvelopeMixin, APIView):
 
 
 class RecoveryPlanTodayAIGenerateView(EnvelopeMixin, APIView):
-    """POST /plans/recovery-plans/today/ai-generate/ — LLM 기반 오늘 회복 계획 생성."""
+    """POST /plans/recovery-plans/today/ai-generate/ — 정책 기반 오늘 회복 계획 생성."""
 
     permission_classes = [IsAuthenticated]
 
@@ -140,6 +145,7 @@ class RecoverySlotListView(EnvelopeMixin, generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        expire_unanswered_recovery_slots(user=self.request.user)
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(
@@ -160,6 +166,7 @@ class RecoverySlotTodayListView(EnvelopeMixin, generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        expire_unanswered_recovery_slots(user=self.request.user)
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(
@@ -201,6 +208,7 @@ class RecoverySlotHistoryView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         filters = self.get_history_filters()
+        expire_unanswered_recovery_slots(user=self.request.user)
         queryset = (
             RecoverySlot.objects.select_related(
                 "recovery_plan",
@@ -274,7 +282,7 @@ class RecoverySlotNextView(EnvelopeMixin, APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        slot = get_next_slot_for_user(request.user)
+        slot = get_runnable_slot_for_user(request.user)
         if slot is None:
             raise NotFound("다음 회복 슬롯이 없습니다.")
         return Response(RecoverySlotSerializer(slot).data)
@@ -310,6 +318,38 @@ class RecoverySlotScheduleView(EnvelopeMixin, APIView):
         serializer.is_valid(raise_exception=True)
         slot = schedule_slot_time(slot=slot, **serializer.validated_data)
         return Response(RecoverySlotSerializer(slot).data)
+
+
+class RecoverySlotCancelBeforeView(EnvelopeMixin, APIView):
+    """POST /plans/recovery-slots/cancel-before/ — 지정 시각 이전 스냅샷 기반 슬롯을 취소."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = RecoverySlotCancelBeforeSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        slots = cancel_snapshot_slots_before(user=request.user, **serializer.validated_data)
+        return Response(
+            {
+                "canceled_count": len(slots),
+                "slots": RecoverySlotSerializer(slots, many=True).data,
+            }
+        )
+
+
+class RecoverySlotConsumeSnapshotView(EnvelopeMixin, APIView):
+    """POST /plans/recovery-slots/consume-nearest-snapshot/ — 재진입으로 가장 가까운 스냅샷 슬롯 1개 취소."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        slot = cancel_next_snapshot_slot_for_reentry(user=request.user)
+        return Response(
+            {
+                "canceled_count": 1 if slot else 0,
+                "slot": RecoverySlotSerializer(slot).data if slot else None,
+            }
+        )
 
 
 class RecoverySlotNotificationView(EnvelopeMixin, APIView):

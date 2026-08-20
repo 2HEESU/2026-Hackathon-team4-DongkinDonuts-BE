@@ -28,6 +28,11 @@ class NotificationKind(models.TextChoices):
     REENGAGEMENT = "REENGAGEMENT", "재진입"
 
 
+class SlotNotificationBasis(models.TextChoices):
+    SNAPSHOT = "SNAPSHOT", "스냅샷 기반"
+    FREQUENCY = "FREQUENCY", "빈도 기반"
+
+
 class InsightType(models.TextChoices):
     TODAY_ANALYSIS = "TODAY_ANALYSIS", "오늘의 분석"
     RECOMMENDATION_REASON = "RECOMMENDATION_REASON", "추천 이유"
@@ -154,6 +159,11 @@ class RecoverySlot(BaseModel):
     interval_minutes = models.PositiveIntegerField(null=True, blank=True)
     repeat_rule = models.CharField(max_length=120, blank=True)
     notification_enabled = models.BooleanField(default=True)
+    notification_basis = models.CharField(
+        max_length=20,
+        choices=SlotNotificationBasis.choices,
+        default=SlotNotificationBasis.SNAPSHOT,
+    )
     status = models.CharField(max_length=20, choices=SlotStatus.choices, default=SlotStatus.RECOMMENDED)
 
     class Meta:
