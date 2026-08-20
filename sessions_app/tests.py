@@ -246,6 +246,10 @@ class SessionAbortCompleteApiTest(APITestCase):
             restart_response.status_code,
             status.HTTP_201_CREATED,
         )
+        self.assertEqual(
+            restart_response.data["data"]["remaining_session_count"],
+            2,
+        )
 
         self.shift_routine.refresh_from_db()
 
@@ -352,6 +356,10 @@ class SessionAbortCompleteApiTest(APITestCase):
             response_data["status"],
             SessionStatus.COMPLETED,
         )
+        self.assertEqual(
+            response_data["remaining_session_count"],
+            1,
+        )
         self.assertNotIn(
             "streak_count",
             response_data,
@@ -430,6 +438,10 @@ class SessionAbortCompleteApiTest(APITestCase):
         self.assertEqual(
             self.recovery_slot.status,
             SlotStatus.COMPLETED,
+        )
+        self.assertEqual(
+            response.data["data"]["remaining_session_count"],
+            0,
         )
 
     def test_complete_allows_metrics_to_be_omitted(self):
