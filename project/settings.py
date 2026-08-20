@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 import os
 from pathlib import Path
+
 import environ
 from corsheaders.defaults import default_headers
 
@@ -18,7 +19,7 @@ from corsheaders.defaults import default_headers
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 env = environ.Env(DEBUG=(bool, True))
-environ.Env.read_env(os.path.join(BASE_DIR, '.env'))
+environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
@@ -131,7 +132,7 @@ USE_TZ = False
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = "static/"
-STATIC_ROOT = os.path.join(BASE_DIR, 'static')
+STATIC_ROOT = os.path.join(BASE_DIR, "static")
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
@@ -199,5 +200,4 @@ WEB_PUSH_TIMEOUT_SECONDS = env.int("WEB_PUSH_TIMEOUT_SECONDS", default=10)
 # 시연/테스트 전용 데모 모드 (기본값 False로 안전 세팅 -> AI 1차 채점 시 20분/30분 학술 지침 정상 작동)
 # 현장 시연 시 서버 환경변수 DEMO_MODE=true 로 켜면 10초/15초 시연 모드 작동
 DEMO_MODE = env.bool("DEMO_MODE", default=False)
-
 
