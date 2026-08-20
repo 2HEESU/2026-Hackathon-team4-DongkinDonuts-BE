@@ -588,6 +588,28 @@ class RecoverySlotCreateSerializer(OwnedContextInputMixin, serializers.Serialize
     notification_enabled = serializers.BooleanField(default=True)
 
 
+class RecoverySlotReentrySerializer(serializers.Serializer):
+    context_snapshot = serializers.PrimaryKeyRelatedField(
+        queryset=UserContextSnapshot.objects.all(),
+    )
+    next_activity_plan = serializers.PrimaryKeyRelatedField(
+        queryset=NextActivityPlan.objects.all(),
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+
+    def validate_context_snapshot(self, value):
+        if value.user_id != self.context["request"].user.id:
+            raise serializers.ValidationError("본인의 상태 스냅샷만 사용할 수 있습니다.")
+        return value
+
+    def validate_next_activity_plan(self, value):
+        if value is not None and value.user_id != self.context["request"].user.id:
+            raise serializers.ValidationError("본인의 이후 활동 계획만 사용할 수 있습니다.")
+        return value
+
+
 class RecoverySlotScheduleSerializer(serializers.Serializer):
     scheduled_at = serializers.DateTimeField()
 

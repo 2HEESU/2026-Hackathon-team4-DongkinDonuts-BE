@@ -17,6 +17,7 @@ from .views import (
     RecoverySlotNextResetTimeView,
     RecoverySlotNextView,
     RecoverySlotNotificationView,
+    RecoverySlotReentryView,
     RecoverySlotResetNextActivityView,
     RecoverySlotScheduleView,
     RecoverySlotTodayListView,
@@ -54,6 +55,11 @@ urlpatterns = [
         "recovery-slots/consume-nearest-snapshot/",
         RecoverySlotConsumeSnapshotView.as_view(),
         name="recovery-slot-consume-nearest-snapshot",
+    ),
+    path(
+        "recovery-slots/reentry/",
+        RecoverySlotReentryView.as_view(),
+        name="recovery-slot-reentry",
     ),
     path("recovery-slots/next/", RecoverySlotNextView.as_view(), name="recovery-slot-next"),
     path(

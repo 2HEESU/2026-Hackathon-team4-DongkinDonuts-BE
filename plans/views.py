@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from common.mixins import EnvelopeMixin
 from context.utils import today_for_user
 
-from .ai_planner import generate_ai_recovery_plan
+from .ai_planner import create_reentry_recovery_slot, generate_ai_recovery_plan
 from .models import Notification, PlanStatus, RecoveryPlan, RecoverySlot, WebPushSubscription
 from .serializers import (
     AIRecoveryPlanGenerateSerializer,
@@ -23,6 +23,7 @@ from .serializers import (
     RecoverySlotHistoryQuerySerializer,
     RecoverySlotHistorySerializer,
     RecoverySlotNotificationSerializer,
+    RecoverySlotReentrySerializer,
     RecoverySlotScheduleSerializer,
     RecoverySlotSerializer,
     SlotFeedbackSerializer,
@@ -34,7 +35,6 @@ from .services import (
     cancel_next_snapshot_slot_for_reentry,
     cancel_snapshot_slots_before,
     cancel_slot,
-    cleanup_nearby_pattern_notifications_on_entry,
     create_or_replace_today_plan,
     create_recovery_slot,
     deactivate_web_push_subscription,
@@ -172,10 +172,6 @@ class RecoverySlotTodayListView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         expire_unanswered_recovery_slots(user=self.request.user)
-        # 사용자가 오늘 슬롯 목록을 조회하는 시점 = 서비스에 진입한 시점으로 보고,
-        # 지금과 너무 가까운 시간대의 빈도 기반 알림은 이미 사용자가 들어와있으니
-        # 굳이 다시 알릴 필요 없다고 판단해 취소한다.
-        cleanup_nearby_pattern_notifications_on_entry(user=self.request.user)
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(
@@ -358,6 +354,21 @@ class RecoverySlotConsumeSnapshotView(EnvelopeMixin, APIView):
                 "canceled_count": 1 if slot else 0,
                 "slot": RecoverySlotSerializer(slot).data if slot else None,
             }
+        )
+
+
+class RecoverySlotReentryView(EnvelopeMixin, APIView):
+    """POST /plans/recovery-slots/reentry/ — 활성 활동 중 재진입 즉시 세션 슬롯 생성."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = RecoverySlotReentrySerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        slot = create_reentry_recovery_slot(user=request.user, **serializer.validated_data)
+        return Response(
+            RecoverySlotSerializer(slot, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
         )
 
 
