@@ -1155,3 +1155,42 @@ def cleanup_nearby_pattern_notifications_on_entry(*, user, current_time=None, th
             canceled_slots.append(slot)
 
     return canceled_slots
+
+
+def cancel_nearest_upcoming_pc_usage_block_notifications(*, user, current_time=None):
+    """
+    [상태 선택 모달로 알림을 직접 설정했을 때의 정리 정책]
+    My Digital State가 오늘 하루치를 미리 예약해두는 이유는 "서비스를 써야
+    한다는 걸 인지 못 하는 순간에도 알려주기 위함"이다. 근데 사용자가 이미
+    스스로 인지하고 서비스에 들어와서 상태 선택 모달로 알림을 새로 설정했다면,
+    지금 시점 이후 가장 가까운(아직 시작 안 한) PC 사용 블록 하나는 굳이
+    중복으로 울릴 필요가 없다고 보고 그 블록의 빈도 기반 알림만 취소한다.
+    더 먼 다른 블록들은 손대지 않는다.
+    """
+    now = current_time or timezone.now()
+
+    upcoming_windows = [
+        window for window in _today_pc_usage_windows(user) if window[0] > now
+    ]
+    if not upcoming_windows:
+        return []
+
+    nearest_start, nearest_end = min(upcoming_windows, key=lambda window: window[0])
+
+    open_slots = RecoverySlot.objects.filter(
+        recovery_plan__user=user,
+        recovery_plan__plan_date=today_for_user(user),
+        status__in=OPEN_SLOT_STATUSES,
+        notification_basis=SlotNotificationBasis.FREQUENCY,
+    ).select_related("recovery_plan")
+
+    canceled_slots = []
+    for slot in open_slots:
+        slot_time = slot.effective_time
+        if slot_time and nearest_start <= slot_time < nearest_end:
+            slot.status = SlotStatus.CANCELED
+            slot.save(update_fields=["status", "updated_at"])
+            sync_slot_notification(slot)
+            canceled_slots.append(slot)
+
+    return canceled_slots
