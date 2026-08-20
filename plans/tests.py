@@ -888,6 +888,14 @@ class RecoveryPlanApiTests(APITestCase):
             data_sources_json=["llm_routine_reason"],
         )
 
+        SessionFeedback.objects.create(
+            recovery_slot=completed_slot,
+            user=user,
+            recovery_feeling="MUCH_BETTER",
+            difficulty_feedback="JUST_RIGHT",
+            skipped=False,
+        )
+
         date_response = self.client.get(f"/api/v1/plans/recovery-slots/history/?date={today}")
         self.assertEqual(date_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(date_response.data["data"]), 3)
@@ -897,8 +905,12 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_statuses[str(completed_slot.id)], "COMPLETED")
         self.assertEqual(history_statuses[str(upcoming_slot.id)], "UPCOMING")
 
+        completed_item = next(item for item in date_response.data["data"] if item["id"] == str(completed_slot.id))
+        self.assertEqual(completed_item["remark"], "훨씬 나아졌어요")
+
         missed_item = next(item for item in date_response.data["data"] if item["id"] == str(missed_slot.id))
         self.assertEqual(missed_item["history_status_label"], "진행 예정")
+
         self.assertIn("목이 뻐근해요", missed_item["input_summary"])
         self.assertIn("과제", missed_item["input_summary"])
         self.assertIn("45분 예정", missed_item["input_summary"])
