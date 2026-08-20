@@ -1,4 +1,9 @@
+from datetime import timedelta
+
+from django.utils import timezone
+
 from context.utils import today_for_user
+from sessions_app.models import Session, SessionStatus
 
 from .models import DayOfWeek, PcUsagePattern
 
@@ -166,5 +171,92 @@ def analyze_pc_usage_patterns(user):
             "day_pattern": summarize_day_pattern(day_usage_counts),
             "time_pattern": summarize_time_pattern(hour_usage_counts),
             "time_of_day_pattern": summarize_time_of_day_pattern(patterns),
+        },
+    }
+
+
+class _HourOnlyCell:
+    """summarize_time_of_day_pattern은 .hour 속성이 있는 객체 리스트를 받는데,
+    PcUsagePattern 모델 인스턴스 대신 세션 기록에서 뽑은 시각을 넣어줄 때 쓰는
+    가벼운 래퍼."""
+
+    def __init__(self, hour):
+        self.hour = hour
+
+
+def analyze_recent_session_patterns(user, days=7):
+    """
+    '언제 PC를 쓸 것 같다'는 자기보고(PcUsagePattern 체크)가 아니라, 최근 `days`일간
+    실제로 완료한 회복 세션 기록(Session.started_at)을 근거로 같은 형태의 분석
+    결과를 만든다. 사용자가 미리 예정해둔 패턴보다, 실제로 회복 세션을 시작한
+    시점이 훨씬 신뢰할 수 있는 신호라서 이걸로 대체한다.
+
+    같은 (요일, 시) 조합에 세션이 여러 번 있어도 한 칸으로만 센다 — 자기보고
+    버전(analyze_pc_usage_patterns)의 "이 요일 이 시간대엔 보통 활동한다"는
+    의미와 동일한 형태를 유지해서, 프론트가 두 응답을 그대로 같은 컴포넌트에
+    꽂아 쓸 수 있게 하기 위함이다.
+    """
+    since = timezone.now() - timedelta(days=days)
+
+    sessions = Session.objects.filter(
+        user=user,
+        status=SessionStatus.COMPLETED,
+        started_at__gte=since,
+    )
+
+    day_usage_counts = {day: 0 for day in DAY_ORDER}
+    hour_usage_counts = {hour: 0 for hour in range(24)}
+    seen_cells = set()
+    selected_cells = []
+
+    for session in sessions:
+        # USE_TZ=False라서 started_at은 이미 로컬(Asia/Seoul) 벽시계 시각 그대로다.
+        day_code = DAY_ORDER[session.started_at.weekday()]
+        hour = session.started_at.hour
+        cell_key = (day_code, hour)
+
+        if cell_key in seen_cells:
+            continue
+        seen_cells.add(cell_key)
+
+        day_usage_counts[day_code] += 1
+        hour_usage_counts[hour] += 1
+        selected_cells.append(
+            {
+                "day_of_week": day_code,
+                "day_label": DAY_LABELS[day_code],
+                "hour": hour,
+                "start_time": f"{hour:02d}:00",
+                "end_time": f"{hour + 1:02d}:00",
+            }
+        )
+
+    selected_cells.sort(key=lambda item: (DAY_ORDER.index(item["day_of_week"]), item["hour"]))
+
+    weekly_usage_hours = len(selected_cells)
+    weekly_usage_days = [
+        {"day_of_week": day, "label": DAY_LABELS[day], "usage_hours": day_usage_counts[day]}
+        for day in DAY_ORDER
+        if day_usage_counts[day] > 0
+    ]
+
+    return {
+        "analysis_window_days": days,
+        "selected_cells": selected_cells,
+        "weekly_pc_usage_hours": weekly_usage_hours,
+        "weekly_pc_usage_days": weekly_usage_days,
+        "weekly_pc_usage_day_count": len(weekly_usage_days),
+        "weekly_activity_rate": {
+            "selected_cells": weekly_usage_hours,
+            "total_cells": TOTAL_WEEKLY_CELLS,
+            "ratio": round(weekly_usage_hours / TOTAL_WEEKLY_CELLS, 4),
+            "percent": round(weekly_usage_hours / TOTAL_WEEKLY_CELLS * 100, 2),
+        },
+        "most_used_patterns": {
+            "day_pattern": summarize_day_pattern(day_usage_counts),
+            "time_pattern": summarize_time_pattern(hour_usage_counts),
+            "time_of_day_pattern": summarize_time_of_day_pattern(
+                [_HourOnlyCell(cell["hour"]) for cell in selected_cells]
+            ),
         },
     }
