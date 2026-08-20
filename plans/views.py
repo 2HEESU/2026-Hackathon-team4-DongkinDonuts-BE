@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from common.mixins import EnvelopeMixin
 from context.utils import today_for_user
 
-from .ai_planner import generate_ai_recovery_plan
+from .ai_planner import create_reentry_recovery_slot, generate_ai_recovery_plan
 from .models import Notification, PlanStatus, RecoveryPlan, RecoverySlot, WebPushSubscription
 from .serializers import (
     AIRecoveryPlanGenerateSerializer,
@@ -23,6 +23,7 @@ from .serializers import (
     RecoverySlotHistoryQuerySerializer,
     RecoverySlotHistorySerializer,
     RecoverySlotNotificationSerializer,
+    RecoverySlotReentrySerializer,
     RecoverySlotScheduleSerializer,
     RecoverySlotSerializer,
     SlotFeedbackSerializer,
@@ -80,7 +81,11 @@ class RecoveryPlanTodayView(EnvelopeMixin, APIView):
 
 
 class RecoveryPlanTodayAIGenerateView(EnvelopeMixin, APIView):
-    """POST /plans/recovery-plans/today/ai-generate/ — 정책 기반 오늘 회복 계획 생성."""
+    """
+    POST /plans/recovery-plans/today/ai-generate/ — 오늘 회복 계획 생성.
+    use_ai_decision=true일 때만 실제 LLM을 시도하고, 아니면(기본값) 서버 정책
+    엔진만 쓴다.
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -167,6 +172,13 @@ class RecoverySlotTodayListView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         expire_unanswered_recovery_slots(user=self.request.user)
+        # cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)를
+        # 여기 걸어놨었는데, 이 엔드포인트가 "진짜 진입 시점"에만 불리는 게
+        # 아니라 useRoutineHome 마운트 때마다(=생성 직후 리렌더 때도) 불려서
+        # 방금 막 만든 알림을 스스로 취소해버리는 버그가 있었다 — 제거함.
+        # 진입 시점에 가까운 PC 사용 블록을 정리하는 건 이제
+        # cancel_nearest_upcoming_pc_usage_block_notifications가 정확한
+        # 트리거 시점(모달 생성 성공 직후)에만 맡는다.
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(
@@ -349,6 +361,21 @@ class RecoverySlotConsumeSnapshotView(EnvelopeMixin, APIView):
                 "canceled_count": 1 if slot else 0,
                 "slot": RecoverySlotSerializer(slot).data if slot else None,
             }
+        )
+
+
+class RecoverySlotReentryView(EnvelopeMixin, APIView):
+    """POST /plans/recovery-slots/reentry/ — 활성 활동 중 재진입 즉시 세션 슬롯 생성."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = RecoverySlotReentrySerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        slot = create_reentry_recovery_slot(user=request.user, **serializer.validated_data)
+        return Response(
+            RecoverySlotSerializer(slot, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
         )
 
 

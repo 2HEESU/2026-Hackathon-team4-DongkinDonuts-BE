@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from common.constants import CameraPermissionStatus
+from routines.models import RoutineInstanceStatus
 from routines.serializers import ActivityTypeSerializer
 
 from .models import Session, SessionEvent, DifficultyFeedback, RecoveryFeeling, SessionFeedback
@@ -21,6 +22,32 @@ class SessionSerializer(serializers.ModelSerializer):
     routine_instance_id = serializers.UUIDField(read_only=True)
     activity = ActivityTypeSerializer(read_only=True)
     events = SessionEventSerializer(many=True, read_only=True)
+    remaining_session_count = serializers.SerializerMethodField()
+
+    def get_remaining_session_count(self, obj):
+        routine_instances = getattr(
+            obj.recovery_slot,
+            "_prefetched_objects_cache",
+            {},
+        ).get("routine_instances")
+
+        terminal_statuses = {
+            RoutineInstanceStatus.COMPLETED,
+            RoutineInstanceStatus.CANCELED,
+        }
+
+        if routine_instances is not None:
+            return sum(
+                routine_instance.status not in terminal_statuses
+                for routine_instance in routine_instances
+            )
+
+        return (
+            obj.recovery_slot.routine_instances.exclude(
+                status__in=terminal_statuses,
+            )
+            .count()
+        )
 
     class Meta:
         model = Session
@@ -28,6 +55,7 @@ class SessionSerializer(serializers.ModelSerializer):
             "id",
             "recovery_slot_id",
             "routine_instance_id",
+            "remaining_session_count",
             "activity",
             "started_at",
             "ended_at",

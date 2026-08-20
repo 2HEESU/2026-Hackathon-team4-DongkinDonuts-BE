@@ -1,6 +1,9 @@
 import json
+import logging
 import random
+from datetime import datetime, timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
@@ -8,20 +11,29 @@ from rest_framework.exceptions import ValidationError
 
 from common.models import StateOption
 from context.models import NextActivityPlan, UserContextSnapshot, UserContextSnapshotState
+from context.services import get_current_valid_next_activity_plan
 from context.utils import today_for_user
 from digital_state.models import PcUsagePattern
 from digital_state.services import DAY_LABELS, DAY_ORDER, analyze_pc_usage_patterns
 from routines.models import ActivityType, RoutineInstance, RoutineInstanceStatus, StageType
 from sessions_app.models import Session, SessionFeedback
 
-from .models import AIInsight, AIPlanRun, InsightType
+from .models import AIInsight, AIPlanRun, InsightType, PlanStatus, RecoveryPlan, SlotNotificationBasis
+from .openai_client import OpenAIClientError, OpenAIConfigurationError, create_structured_response
 from .services import (
+    build_plan_generation_snapshot,
     build_policy_recommended_slots,
+    cancel_next_snapshot_slot_for_reentry,
     create_or_replace_today_plan,
+    create_recovery_slot,
     get_today_pc_usage_patterns,
+    is_within_pc_usage_pattern,
     recommend_next_reset_time,
     recovery_time_policy_for_context,
+    validate_context_inputs,
 )
+
+logger = logging.getLogger(__name__)
 
 
 STAGE_SEQUENCE = {
@@ -32,6 +44,9 @@ STAGE_SEQUENCE = {
 
 COMMON_STAGE_TYPES = [StageType.BRAIN_WAKE, StageType.BRAIN_RESET]
 POLICY_GENERATOR_NAME = "server_policy"
+# RECOVERY_PLAN_SCHEMA의 slots.maxItems와 맞춘 안전 상한선 — "몇 개를 만들지"는
+# AI가 자유롭게 정하되, 폭주 응답으로부터 서버/사용자를 보호하는 최후의 방어선.
+MAX_AI_SLOTS = 12
 WAKE_ACTIVITY_CODE = "WAKE_HAND_ROUTINE"
 RESET_ACTIVITY_CODE = "RESET_BREATH"
 RANDOM_SHIFT_SENTINEL = "__RANDOM_PREPARED_SHIFT__"
@@ -351,6 +366,29 @@ def _context_state_codes(context_snapshot):
     return list(context_snapshot.state_links.order_by("priority").values_list("state_id", flat=True))
 
 
+def _ordered_activities_by_codes(queryset, codes):
+    activities = list(queryset.filter(code__in=codes).order_by("code"))
+    by_code = {activity.code: activity for activity in activities}
+    return [
+        by_code[code]
+        for code in codes
+        if code in by_code
+    ]
+
+
+def _shift_candidates_for_state_code(state_code):
+    queryset = ActivityType.objects.filter(is_active=True, stage_type=StageType.BRAIN_SHIFT)
+    mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
+
+    if mapped_codes == RANDOM_SHIFT_SENTINEL:
+        return _ordered_activities_by_codes(queryset, RANDOM_PREPARED_SHIFT_ACTIVITY_CODES)
+
+    if mapped_codes:
+        return _ordered_activities_by_codes(queryset, mapped_codes)
+
+    return list(queryset.filter(target_state_id=state_code).order_by("code"))
+
+
 def _combined_state_codes(context_snapshot, next_activity_plan=None):
     state_codes = []
 
@@ -370,45 +408,97 @@ def _combined_state_codes(context_snapshot, next_activity_plan=None):
 def _shift_activities_for_context(context_snapshot, next_activity_plan=None):
     state_codes = _combined_state_codes(context_snapshot, next_activity_plan)
     queryset = ActivityType.objects.filter(is_active=True, stage_type=StageType.BRAIN_SHIFT)
-    random_requested = False
+    activities = []
+    used_codes = set()
 
     for state_code in state_codes:
-        mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
-        if mapped_codes is None:
-            continue
-        if mapped_codes == RANDOM_SHIFT_SENTINEL:
-            random_requested = True
-            continue
+        for activity in _shift_candidates_for_state_code(state_code):
+            if activity.code in used_codes:
+                continue
+            activities.append(activity)
+            used_codes.add(activity.code)
 
-        activities = list(
-            queryset.filter(code__in=mapped_codes).order_by("code")
-        )
-        by_code = {activity.code: activity for activity in activities}
-        ordered = [
-            by_code[code]
-            for code in mapped_codes
-            if code in by_code
-        ]
-        if ordered:
-            return ordered
-
-    if random_requested:
-        activities = list(
-            queryset.filter(code__in=RANDOM_PREPARED_SHIFT_ACTIVITY_CODES)
-        )
-        by_code = {activity.code: activity for activity in activities}
-        return [
-            by_code[code]
-            for code in RANDOM_PREPARED_SHIFT_ACTIVITY_CODES
-            if code in by_code
-        ]
+    if activities:
+        return activities
 
     if state_codes:
-        activities = list(queryset.filter(target_state_id__in=state_codes))
-        if activities:
+        fallback_activities = list(queryset.filter(target_state_id__in=state_codes))
+        if fallback_activities:
             priority = {code: index for index, code in enumerate(state_codes)}
-            return sorted(activities, key=lambda activity: (priority.get(activity.target_state_id, 999), activity.code))
+            return sorted(fallback_activities, key=lambda activity: (priority.get(activity.target_state_id, 999), activity.code))
+
     return list(queryset.filter(code__in=RANDOM_PREPARED_SHIFT_ACTIVITY_CODES).order_by("code"))
+
+
+def _primary_shift_recommendations_for_state_codes(state_codes, context_snapshot, next_activity_plan):
+    recommendations = []
+    used_codes = set()
+    state_defaults = _state_default_difficulty_map(
+        context_snapshot,
+        next_activity_plan,
+    )
+
+    for state_code in state_codes:
+        candidates = [
+            activity
+            for activity in _shift_candidates_for_state_code(state_code)
+            if activity.code not in used_codes
+        ]
+        if not candidates:
+            continue
+        mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
+        activity = (
+            random.choice(candidates)
+            if mapped_codes == RANDOM_SHIFT_SENTINEL
+            else candidates[0]
+        )
+        used_codes.add(activity.code)
+        recommendations.append(
+            {
+                "activity_code": activity.code,
+                "difficulty_level": _difficulty_for_activity(
+                    activity,
+                    default_difficulty=state_defaults.get(
+                        activity.target_state_id,
+                        activity.min_difficulty,
+                    ),
+                ),
+                "planned_duration_sec": activity.default_duration_sec,
+                "reason": (
+                    activity.purpose
+                    or "현재 상태에 맞는 Brain Shift 활동입니다."
+                ),
+            }
+        )
+
+        if len(recommendations) >= 2:
+            break
+
+    return recommendations or [{}]
+
+
+def _reentry_state_codes(context_snapshot, next_activity_plan):
+    state_codes = []
+    attached_snapshot = getattr(next_activity_plan, "context_snapshot", None)
+
+    for snapshot in [context_snapshot, attached_snapshot]:
+        if snapshot is None:
+            continue
+        for code in _context_state_codes(snapshot):
+            if code not in state_codes:
+                state_codes.append(code)
+            if len(state_codes) >= 2:
+                return state_codes
+
+    return state_codes
+
+
+def _reentry_shift_recommendations(context_snapshot, next_activity_plan):
+    return _primary_shift_recommendations_for_state_codes(
+        _reentry_state_codes(context_snapshot, next_activity_plan),
+        context_snapshot,
+        next_activity_plan,
+    )
 
 
 def _serialize_shift_activity_catalog(context_snapshot, next_activity_plan):
@@ -530,10 +620,13 @@ def _policy_summary(input_snapshot):
     )
 
 
-def _policy_insights(input_snapshot):
+def _policy_insights(input_snapshot, *, include_frequency_slots=True):
     insights = []
 
-    if input_snapshot["pc_usage_patterns"]:
+    # include_frequency_slots=False(My Digital State와 무관한 흐름)일 땐 실제로
+    # PC 사용 패턴/과거 세션을 슬롯 배치에 안 썼으니, 썼다고 오해하게 만드는
+    # 인사이트 문구도 같이 빼야 한다.
+    if include_frequency_slots and input_snapshot["pc_usage_patterns"]:
         insights.append(
             {
                 "insight_type": InsightType.DATA_INSIGHT,
@@ -546,7 +639,7 @@ def _policy_insights(input_snapshot):
             }
         )
 
-    if input_snapshot["previous_sessions"]:
+    if include_frequency_slots and input_snapshot["previous_sessions"]:
         insights.append(
             {
                 "insight_type": InsightType.DATA_INSIGHT,
@@ -599,13 +692,15 @@ def _policy_shift_recommendations(context_snapshot, next_activity_plan):
     return recommendations or [{}]
 
 
-def build_policy_output(user, context_snapshot, next_activity_plan, input_snapshot):
+def build_policy_output(user, context_snapshot, next_activity_plan, input_snapshot, *, include_frequency_slots=True):
     policy = recovery_time_policy_for_context(context_snapshot)
     recommended_slots = build_policy_recommended_slots(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         base_time=timezone.now().replace(microsecond=0),
+        include_frequency_slots=include_frequency_slots,
+        prioritize_pc_usage_windows=include_frequency_slots,
     )
 
     return {
@@ -622,20 +717,102 @@ def build_policy_output(user, context_snapshot, next_activity_plan, input_snapsh
             }
             for policy_slot in recommended_slots
         ],
-        "insights": _policy_insights(input_snapshot),
+        "insights": _policy_insights(input_snapshot, include_frequency_slots=include_frequency_slots),
     }
 
 
-def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan):
+def _parse_ai_recommended_at(raw_value):
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
+def _normalize_llm_authored_slots(raw_slots, *, user, now, today, policy):
+    """
+    LLM이 스스로 정한 슬롯 "개수"와 "시각"을 그대로 신뢰해서 쓴다(정책 엔진의
+    build_policy_recommended_slots를 거치지 않음) — 대신 서버가 최소한의 안전장치로
+    (1) 현재 시각 이후인지, (2) plan_date 당일인지, (3) 사용자의 PC 사용 패턴
+    블록 안에 들어가는지를 검증해서, 통과 못 하는 슬롯은 조용히 버린다.
+    프롬프트의 [필수 제약 조건]을 코드로도 강제하는 것.
+    """
+    seen_times = set()
+    candidates = []
+    for raw_slot in raw_slots[:MAX_AI_SLOTS]:
+        if not isinstance(raw_slot, dict):
+            continue
+
+        recommended_at = _parse_ai_recommended_at(raw_slot.get("recommended_at"))
+        if recommended_at is None or recommended_at <= now:
+            continue
+        if recommended_at.date() != today:
+            continue
+        if not is_within_pc_usage_pattern(user, recommended_at):
+            continue
+        if recommended_at in seen_times:
+            continue
+        seen_times.add(recommended_at)
+
+        candidates.append(
+            {
+                "recommended_at": recommended_at,
+                "interval_minutes": _safe_int(
+                    raw_slot.get("interval_minutes"),
+                    default=policy["interval_minutes"],
+                    minimum=5,
+                    maximum=240,
+                ),
+                "notification_basis": SlotNotificationBasis.FREQUENCY,
+                "reason": _time_policy_reason(policy, raw_slot.get("reason")),
+                "data_sources": ["pc_usage_patterns", "previous_sessions", "ai_decision"],
+                "shift_recommendations": _coerce_shift_recommendations(raw_slot),
+            }
+        )
+
+    candidates.sort(key=lambda item: item["recommended_at"])
+    return candidates
+
+
+def normalize_ai_slots(
+    ai_output,
+    user,
+    context_snapshot,
+    next_activity_plan,
+    *,
+    is_ai_generated=False,
+    use_ai_decision=False,
+):
     now = timezone.now().replace(microsecond=0)
     policy = recovery_time_policy_for_context(context_snapshot)
+    raw_slots = ai_output.get("slots", [])
+
+    if is_ai_generated:
+        llm_slots = _normalize_llm_authored_slots(
+            raw_slots,
+            user=user,
+            now=now,
+            today=today_for_user(user),
+            policy=policy,
+        )
+        if llm_slots:
+            return llm_slots
+        # LLM이 준 슬롯 중 검증을 통과한 게 하나도 없으면(전부 PC 패턴 밖이거나
+        # 과거 시각이거나 등) 정책 엔진으로 안전하게 폴백한다.
+        logger.warning("AI가 반환한 슬롯이 전부 검증에 실패해 정책 엔진으로 폴백합니다.")
+
+    # use_ai_decision=False(My Digital State 흐름이 아님, 예: 상태 선택 모달)면
+    # PC 사용 패턴/과거 세션 빈도는 아예 참고하지 않는다 — 이 흐름은
+    # digital_state와 완전히 무관해야 한다.
     policy_slots = build_policy_recommended_slots(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         base_time=now,
+        include_frequency_slots=use_ai_decision,
+        prioritize_pc_usage_windows=use_ai_decision,
     )
-    raw_slots = ai_output.get("slots", [])
     normalized = []
 
     for index, policy_slot in enumerate(policy_slots):
@@ -947,12 +1124,13 @@ def _persist_ai_plan(
     raw_response,
     normalized_slots,
     notification_enabled,
+    generator_name=POLICY_GENERATOR_NAME,
 ):
     ai_run = AIPlanRun.objects.create(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
-        model_name=POLICY_GENERATOR_NAME,
+        model_name=generator_name,
         input_snapshot_json=input_snapshot,
         output_snapshot_json={"parsed": ai_output, "raw_response": raw_response},
     )
@@ -987,12 +1165,95 @@ def _persist_ai_plan(
     return plan
 
 
+def _is_next_activity_plan_active(next_activity_plan, now):
+    if next_activity_plan.expected_activity_minutes is None:
+        return False
+    valid_until = next_activity_plan.created_at + timedelta(
+        minutes=next_activity_plan.expected_activity_minutes,
+    )
+    return valid_until > now
+
+
+@transaction.atomic
+def create_reentry_recovery_slot(
+    *,
+    user,
+    context_snapshot,
+    next_activity_plan=None,
+):
+    """
+    활성 활동 구간 중 서비스에 재진입해 바로 휴식 루틴을 시작하는 흐름.
+
+    기존 활동에 묶인 상태와 방금 입력한 현재 상태를 Brain Shift에 반영하고,
+    새 알림은 만들지 않는다. 이미 잡혀 있던 상태 기반 알림은 가장 가까운
+    미래 슬롯 1개만 취소한다.
+    """
+
+    if next_activity_plan is None:
+        next_activity_plan = get_current_valid_next_activity_plan(user)
+
+    if next_activity_plan is None:
+        raise ValidationError("현재 활성화된 이후 활동 계획이 없습니다.")
+
+    validate_context_inputs(user, context_snapshot, next_activity_plan)
+
+    now = timezone.now().replace(microsecond=0)
+    if not _is_next_activity_plan_active(next_activity_plan, now):
+        raise ValidationError("현재 활성화된 이후 활동 계획이 없습니다.")
+
+    _validate_recovery_activity_catalog(context_snapshot, next_activity_plan)
+
+    plan = (
+        RecoveryPlan.objects.select_for_update()
+        .filter(
+            user=user,
+            plan_date=today_for_user(user),
+            status=PlanStatus.ACTIVE,
+        )
+        .first()
+    )
+    if plan is None:
+        plan = RecoveryPlan.objects.create(
+            user=user,
+            plan_date=today_for_user(user),
+            generation_snapshot_json=build_plan_generation_snapshot(
+                user,
+                context_snapshot,
+                next_activity_plan,
+            ),
+        )
+
+    cancel_next_snapshot_slot_for_reentry(user=user, now=now)
+    slot = create_recovery_slot(
+        plan=plan,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        recommended_at=now,
+        notification_enabled=False,
+        notification_basis=SlotNotificationBasis.SNAPSHOT,
+    )
+    _create_slot_insight(
+        slot,
+        "활성 활동 중 재진입해 현재 상태를 반영한 즉시 회복 세션입니다.",
+        ["context_snapshot", "next_activity_plan"],
+    )
+    _create_routine_instances(
+        slot,
+        context_snapshot,
+        next_activity_plan,
+        _reentry_shift_recommendations(context_snapshot, next_activity_plan),
+    )
+
+    return slot
+
+
 def generate_ai_recovery_plan(
     *,
     user,
     context_snapshot=None,
     next_activity_plan=None,
     notification_enabled=True,
+    use_ai_decision=False,
 ):
     context_snapshot, next_activity_plan = resolve_generation_inputs(
         user=user,
@@ -1001,18 +1262,23 @@ def generate_ai_recovery_plan(
     )
     _validate_recovery_activity_catalog(context_snapshot, next_activity_plan)
     input_snapshot = build_ai_input_snapshot(user, context_snapshot, next_activity_plan)
-    ai_output = build_policy_output(
+
+    ai_output, raw_response, generator_name, is_ai_generated = _generate_plan_output(
+        user=user,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        input_snapshot=input_snapshot,
+        use_ai_decision=use_ai_decision,
+    )
+    normalized_slots = normalize_ai_slots(
+        ai_output,
         user,
         context_snapshot,
         next_activity_plan,
-        input_snapshot,
+        is_ai_generated=is_ai_generated,
+        use_ai_decision=use_ai_decision,
     )
-    raw_response = {
-        "generator": POLICY_GENERATOR_NAME,
-        "external_api_called": False,
-    }
-    normalized_slots = normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan)
-    return _persist_ai_plan(
+    plan = _persist_ai_plan(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
@@ -1021,4 +1287,54 @@ def generate_ai_recovery_plan(
         raw_response=raw_response,
         normalized_slots=normalized_slots,
         notification_enabled=notification_enabled,
+        generator_name=generator_name,
     )
+
+    return plan
+
+
+def _generate_plan_output(*, user, context_snapshot, next_activity_plan, input_snapshot, use_ai_decision):
+    """
+    use_ai_decision=True일 때만 실제 LLM 호출을 먼저 시도한다 — 성공하면 개수/
+    시각까지 AI가 자율적으로 정한 결과를 쓴다. API 키 미설정/호출 실패/예기치
+    못한 오류가 나면 서버 정책 엔진으로 안전하게 폴백해서, OpenAI 장애가 통째로
+    회복 계획 생성 실패로 이어지지 않게 한다(하루 회복 루틴은 사용자에게 핵심
+    기능이라 가용성이 자율성보다 우선).
+
+    use_ai_decision=False(기본값)면 LLM은 아예 시도하지 않고 곧장 정책 엔진으로
+    간다 — My Digital State에서 PC 사용 패턴을 입력하고 만든 흐름이 아니면
+    (예: 상태 선택 모달로 진행하는 "회복 루틴 시작하기") 원래 로직 그대로다.
+    """
+    if use_ai_decision:
+        try:
+            input_messages = build_input_messages(input_snapshot)
+            ai_output, raw_openai_response = create_structured_response(
+                input_messages=input_messages,
+                schema=RECOVERY_PLAN_SCHEMA,
+            )
+            generator_name = f"openai:{settings.OPENAI_MODEL}"
+            raw_response = {
+                "generator": generator_name,
+                "external_api_called": True,
+                "response": raw_openai_response,
+            }
+            return ai_output, raw_response, generator_name, True
+        except OpenAIConfigurationError:
+            logger.info("OPENAI_API_KEY 미설정으로 정책 엔진으로 생성합니다.")
+        except OpenAIClientError:
+            logger.warning("OpenAI API 호출 실패로 정책 엔진으로 폴백합니다.", exc_info=True)
+        except Exception:
+            logger.exception("AI 회복 계획 생성 중 예기치 못한 오류로 정책 엔진으로 폴백합니다.")
+
+    ai_output = build_policy_output(
+        user,
+        context_snapshot,
+        next_activity_plan,
+        input_snapshot,
+        include_frequency_slots=use_ai_decision,
+    )
+    raw_response = {
+        "generator": POLICY_GENERATOR_NAME,
+        "external_api_called": False,
+    }
+    return ai_output, raw_response, POLICY_GENERATOR_NAME, False
