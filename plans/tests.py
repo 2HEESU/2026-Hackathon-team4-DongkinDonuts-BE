@@ -653,6 +653,39 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_response.status_code, status.HTTP_200_OK)
         self.assertEqual(history_response.data["data"][0]["id"], slot_id)
 
+    def test_next_reset_time_skips_overdue_slot_and_shows_next_future_one(self):
+        """
+        "다음 리셋 시간" 카드는 지난(overdue) 슬롯을 절대 보여주면 안 된다.
+        유예 시간(NOTIFICATION_RESPONSE_GRACE_MINUTES) 안이라 슬롯 자체는
+        아직 안 만료돼서 "열려있는" 상태로 남아있어도, 화면에는 항상 지금
+        이후의 가장 가까운 시간만 떠야 한다 — 지난 슬롯은 알림을 눌러
+        들어오면(get_runnable_slot_for_user 쪽) 바로 진행되니 이 카드가
+        따로 안내할 필요가 없다.
+        """
+        user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        plan = RecoveryPlan.objects.create(
+            user=user,
+            plan_date=today_for_user(user),
+            status=PlanStatus.ACTIVE,
+        )
+        overdue_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=1,
+            recommended_at=timezone.now() - timedelta(minutes=5),
+        )
+        future_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=2,
+            recommended_at=timezone.now() + timedelta(minutes=20),
+        )
+
+        reset_time_response = self.client.get("/api/v1/plans/recovery-slots/next-reset-time/")
+
+        self.assertEqual(reset_time_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(reset_time_response.data["data"]["recovery_slot"], str(future_slot.id))
+        self.assertNotEqual(reset_time_response.data["data"]["recovery_slot"], str(overdue_slot.id))
+        self.assertFalse(reset_time_response.data["data"]["is_overdue"])
+
     def test_today_slot_list_does_not_cancel_freshly_created_notifications(self):
         """
         cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)는
