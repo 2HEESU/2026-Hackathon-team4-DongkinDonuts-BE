@@ -593,7 +593,7 @@ class RecoveryPlanApiTests(APITestCase):
         같이 돌아서, 지금과 가까운(기본 30분 이내) 빈도 기반 알림은 CANCELED 처리돼야 한다.
         먼 미래의 슬롯은 그대로 열려있어야 한다.
         """
-        user = User.objects.get(id=self.device_code)
+        user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
         plan = RecoveryPlan.objects.create(
             user=user,
             plan_date=today_for_user(user),
