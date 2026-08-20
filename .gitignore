@@ -13,6 +13,9 @@ media
 
 # 로컬 작업 메모(Claude 세션용, 레포에 올라가면 안 됨)
 .claude-notes/
+.claude/
+run_local_dev.py
+run_local_fe.mjs
 
 # If your build process includes running collectstatic, then you probably don't need or want to include staticfiles/
 # in your Git repository. Update and uncomment the following line accordingly.

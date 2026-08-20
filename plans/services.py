@@ -1,13 +1,13 @@
 import itertools
 from datetime import datetime, time, timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Max, Q
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from context.models import NextActivityPlan, UserContextSnapshot
 from context.utils import today_for_user
 from digital_state.models import DayOfWeek, PcUsagePattern
 from sessions_app.models import Session, SessionFeedback, SessionStatus
@@ -33,8 +33,6 @@ WEEKDAY_TO_DAY_OF_WEEK = {
     5: DayOfWeek.SAT,
     6: DayOfWeek.SUN,
 }
-
-from django.conf import settings
 
 OPEN_SLOT_STATUSES = [
     SlotStatus.RECOMMENDED,
