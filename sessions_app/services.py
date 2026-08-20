@@ -359,12 +359,12 @@ def create_session_event(
         raise NotFound(
             "세션을 찾을 수 없습니다.",
         ) from exc
-    
+
     if session.status != SessionStatus.IN_PROGRESS:
         raise Conflict(
             "진행 중인 세션에만 이벤트를 기록할 수 있습니다.",
         )
-    
+
     return SessionEvent.objects.create(
         session=session,
         event_type=event_type,
