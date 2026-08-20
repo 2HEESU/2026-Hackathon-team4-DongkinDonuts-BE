@@ -37,7 +37,7 @@ AI_SOURCE_LABELS = {
 
 HISTORY_STATUS_LABELS = {
     "COMPLETED": "완료",
-    "UPCOMING": "예정",
+    "UPCOMING": "진행 예정",
     "MISSED": "미완료",
     "IN_PROGRESS": "진행중",
     "CANCELED": "취소",
@@ -151,6 +151,7 @@ def history_status_for_slot(slot, now):
         return "CANCELED"
     if slot.effective_time and slot.effective_time < now:
         return "MISSED"
+
     return "UPCOMING"
 
 
@@ -427,25 +428,34 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
         return routines
 
     def get_remark(self, obj):
-        slot_insights = [
-            insight.body
-            for insight in obj.insights.all()
-            if insight.routine_instance_id is None and insight.body
-        ]
-        if slot_insights:
-            return slot_insights[0]
+        """
+        Your History 비고(remark) 문구 결정 로직:
+        - 취소 (CANCELED) -> "진행 예정 취소"
+        - 진행중 (IN_PROGRESS) / 완료 (COMPLETED) -> "" (비워두기)
+        - 진행 예정 (UPCOMING):
+          * 트랙 1 (PC 사용 패턴 분석 기반 고정 알림) -> "brainfit의 추천 시간"
+          * 트랙 2 (사용자가 세션 후 입력한 타이머 수동 예약) -> "타이머 예약 시간"
+        """
 
-        routine_insights = [
-            insight.body
-            for routine in obj.routine_instances.all()
-            for insight in routine.insights.all()
-            if insight.body
-        ]
-        if routine_insights:
-            return routine_insights[0]
+        status = self.get_history_status(obj)
 
-        plan_insights = [insight.body for insight in obj.recovery_plan.insights.all() if insight.body]
-        return plan_insights[0] if plan_insights else ""
+        if status == "CANCELED":
+            return "진행 예정 취소"
+
+        if status in ["COMPLETED", "IN_PROGRESS"]:
+            return ""
+
+        if status == "UPCOMING":
+            # 트랙 2: 사용자가 직접 시간을 변경(user_changed_at)했거나 수동 지정(scheduled_at)한 타이머
+            if obj.user_changed_at is not None or (
+                obj.scheduled_at is not None and obj.scheduled_at != obj.recommended_at
+            ):
+                return "타이머 예약 시간"
+
+            # 트랙 1: PC 패턴 분석으로 생성된 기본 추천 시각 (recommended_at)
+            return "brainfit의 추천 시간"
+
+        return ""
 
     def get_data_notice(self, obj):
         labels = self.get_data_source_summary(obj)["labels"]
