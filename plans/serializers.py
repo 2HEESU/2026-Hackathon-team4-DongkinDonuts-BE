@@ -148,8 +148,6 @@ def history_status_for_slot(slot, now):
         return "IN_PROGRESS"
     if _has_expired_sent_recovery_notification(slot, now):
         return "CANCELED"
-    if slot.effective_time and slot.effective_time < now:
-        return "MISSED"
 
     return "UPCOMING"
 
