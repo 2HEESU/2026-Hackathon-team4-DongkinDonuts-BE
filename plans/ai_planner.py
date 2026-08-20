@@ -620,6 +620,7 @@ def build_policy_output(user, context_snapshot, next_activity_plan, input_snapsh
         next_activity_plan=next_activity_plan,
         base_time=timezone.now().replace(microsecond=0),
         include_frequency_slots=include_frequency_slots,
+        prioritize_pc_usage_windows=include_frequency_slots,
     )
 
     return {
@@ -730,6 +731,7 @@ def normalize_ai_slots(
         next_activity_plan=next_activity_plan,
         base_time=now,
         include_frequency_slots=use_ai_decision,
+        prioritize_pc_usage_windows=use_ai_decision,
     )
     normalized = []
 

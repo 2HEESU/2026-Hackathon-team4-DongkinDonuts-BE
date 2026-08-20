@@ -774,6 +774,64 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(ai_run.model_name, "server_policy")
         self.assertFalse(ai_run.output_snapshot_json["raw_response"]["external_api_called"])
 
+    def test_ai_generate_policy_fallback_places_one_notification_per_pc_usage_window(self):
+        """
+        LLM이 없을 때(OPENAI_API_KEY 없음, 클래스 기본값) My Digital State
+        흐름(use_ai_decision=True)의 정책 폴백은 PC 사용 패턴의 연속된 시간
+        블록(윈도우)마다 하나씩, 그 블록 중간 지점에 알림을 배치해야 한다 —
+        "여러 블록을 체크하면 그만큼 알림이 나뉘어 온다"는 기대에 맞춘 것이고,
+        상태 인터벌 반복(SNAPSHOT)으로 뭉개지면 안 된다.
+        """
+        user, _ = User.objects.get_or_create(
+            id=self.device_code, defaults={"timezone": "Asia/Seoul"}
+        )
+        today_day = today_day_of_week_for_user(user)
+        # 연속된 두 개의 블록: 06~08시, 10~12시 — 서로 떨어져 있어 별도 윈도우.
+        for hour in [6, 7, 10, 11]:
+            PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=hour, is_used=True)
+
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+
+        fixed_now = timezone.now().replace(hour=5, minute=0, second=0, microsecond=0)
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                    "use_ai_decision": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
+        self.assertEqual(ai_run.model_name, "server_policy")
+
+        plan_id = response.data["data"]["id"]
+        created_slots = list(
+            RecoverySlot.objects.filter(recovery_plan_id=plan_id).order_by("sequence_no")
+        )
+        self.assertEqual(len(created_slots), 2)
+        self.assertEqual(
+            [slot.recommended_at for slot in created_slots],
+            [fixed_now.replace(hour=7, minute=0), fixed_now.replace(hour=11, minute=0)],
+        )
+        self.assertTrue(all(slot.notification_basis == SlotNotificationBasis.FREQUENCY for slot in created_slots))
+
     @override_settings(OPENAI_API_KEY="test-key")
     @patch("plans.ai_planner.create_structured_response")
     def test_ai_generate_never_calls_llm_when_use_ai_decision_omitted(

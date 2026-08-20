@@ -384,6 +384,22 @@ def _today_pc_usage_windows(user):
     return windows
 
 
+def _today_pc_usage_break_times(user, base_time):
+    """
+    오늘 PC 사용 패턴에서 연속된 시간 블록(윈도우)마다 하나씩, 그 블록 중간
+    지점을 쉴만한 타이밍으로 잡아 알림 후보 시각을 만든다. 이미 지나간
+    윈도우(중간 지점이 base_time 이전)는 건너뛴다 — 사용자가 여러 블록을
+    체크하면 그만큼 알림이 나뉘어 오도록 하는 게 목적.
+    """
+    times = []
+    for start, end in _today_pc_usage_windows(user):
+        midpoint = _minute_floor(start + (end - start) / 2)
+        if midpoint <= base_time:
+            continue
+        times.append(midpoint)
+    return times
+
+
 def _activity_window_end(next_activity_plan, base_time):
     expected_minutes = getattr(next_activity_plan, "expected_activity_minutes", None)
     if not expected_minutes:
@@ -587,6 +603,7 @@ def build_policy_recommended_slots(
     base_time=None,
     max_slots=MAX_POLICY_RECOMMENDED_TIMES,
     include_frequency_slots=True,
+    prioritize_pc_usage_windows=False,
 ):
     """
     상태 기반 스냅샷 슬롯과(옵션으로) 빈도 기반 슬롯을 함께 계산한다.
@@ -595,6 +612,12 @@ def build_policy_recommended_slots(
     아예 참고하지 않고 상태 스냅샷+다음 활동 시간만으로 슬롯을 만든다 — 상태
     선택 모달("회복 루틴 시작하기" 등)처럼 My Digital State와 완전히 무관해야
     하는 흐름에서 쓴다.
+
+    prioritize_pc_usage_windows=True(My Digital State에서 PC 사용 패턴을 입력하고
+    만든 흐름에서만 킴)면, 오늘 PC 사용 패턴이 있는 한 상태 인터벌 반복 대신
+    "PC 사용 블록(연속된 시간대)마다 하나씩, 그 블록 중간 지점에 휴식 알림"을
+    우선 배치한다 — 여러 블록을 체크하면 그만큼 알림이 나뉘어 오게 하기 위함.
+    이 플래그가 False인 다른 호출부(예: 이후 활동 다시 설정)는 기존 동작 그대로다.
     """
 
     base_time = _minute_floor(base_time or timezone.now())
@@ -603,20 +626,36 @@ def build_policy_recommended_slots(
     interval = timedelta(minutes=interval_minutes)
     slots_by_time = {}
 
-    activity_end = _activity_window_end(next_activity_plan, base_time)
-    for recommended_at in _activity_interval_times(
-        base_time=base_time,
-        end_time=activity_end,
-        interval=interval,
-        max_slots=max_slots,
-    ):
-        _merge_recommended_slot(
-            slots_by_time,
-            recommended_at=recommended_at,
-            notification_basis=SlotNotificationBasis.SNAPSHOT,
-            reason="이후 활동 시간 동안 현재 상태에 맞춘 회복 간격으로 배치했습니다.",
-            data_sources=["context_snapshot", "next_activity_plan", "time_policy"],
-        )
+    pc_break_times = (
+        _today_pc_usage_break_times(user, base_time)
+        if prioritize_pc_usage_windows and include_frequency_slots
+        else []
+    )
+
+    if pc_break_times:
+        for recommended_at in pc_break_times[:max_slots]:
+            _merge_recommended_slot(
+                slots_by_time,
+                recommended_at=recommended_at,
+                notification_basis=SlotNotificationBasis.FREQUENCY,
+                reason="PC 사용 구간 중간에 짧은 휴식을 권합니다.",
+                data_sources=["pc_usage_patterns", "time_policy"],
+            )
+    else:
+        activity_end = _activity_window_end(next_activity_plan, base_time)
+        for recommended_at in _activity_interval_times(
+            base_time=base_time,
+            end_time=activity_end,
+            interval=interval,
+            max_slots=max_slots,
+        ):
+            _merge_recommended_slot(
+                slots_by_time,
+                recommended_at=recommended_at,
+                notification_basis=SlotNotificationBasis.SNAPSHOT,
+                reason="이후 활동 시간 동안 현재 상태에 맞춘 회복 간격으로 배치했습니다.",
+                data_sources=["context_snapshot", "next_activity_plan", "time_policy"],
+            )
 
     remaining_slots = max(0, min(MAX_PREVIOUS_SESSION_FREQUENCY_TIMES, max_slots - len(slots_by_time)))
     if include_frequency_slots and remaining_slots:
