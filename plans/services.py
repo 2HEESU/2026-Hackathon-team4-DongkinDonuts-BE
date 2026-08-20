@@ -34,6 +34,8 @@ WEEKDAY_TO_DAY_OF_WEEK = {
     6: DayOfWeek.SUN,
 }
 
+from django.conf import settings
+
 OPEN_SLOT_STATUSES = [
     SlotStatus.RECOMMENDED,
     SlotStatus.SCHEDULED,
@@ -47,7 +49,17 @@ RECOVERY_INTERVAL_MINUTES_BY_STATE = {
     "LOW_FOCUS": 45,       # 집중 저하 (45분 인지 회복)
     "OKAY": 90,            # 아직 괜찮아요 (90분)
 }
+
+# DEMO_MODE=True 설정 시 시연/촬영용 초 단위 타이머 매핑 (초 단위 알림)
+DEMO_MODE_SECONDS_BY_STATE = {
+    "EYE_TIRED": 10,       # 10초
+    "BODY_STIFF": 15,      # 15초
+    "SLEEPY": 15,          # 15초
+    "LOW_FOCUS": 20,       # 20초
+    "OKAY": 30,            # 30초
+}
 DEFAULT_RECOVERY_INTERVAL_MINUTES = 45
+
 MAX_POLICY_RECOMMENDED_TIMES = 12
 PREVIOUS_SESSION_FREQUENCY_LOOKBACK_DAYS = 30
 PREVIOUS_SESSION_FREQUENCY_MIN_COUNT = 3
@@ -1273,3 +1285,60 @@ def update_slot_context_on_session_start(*, slot, context_snapshot):
     _create_routine_instances(slot, context_snapshot, slot.next_activity_plan, [])
 
     return slot
+
+
+@transaction.atomic
+def create_dynamic_action_timers(
+    *,
+    user,
+    state_code,
+    activity_duration_minutes,
+):
+    """
+    [트랙 2] 세션 완료 후 사용자 입력 기반 동적 연쇄 타이머 생성
+    DEMO_MODE=True 설정 시 초 단위(10초, 15초, 20초 등)로 작동함.
+    """
+    is_demo = getattr(settings, "DEMO_MODE", False)
+
+    if is_demo:
+        seconds = DEMO_MODE_SECONDS_BY_STATE.get(state_code, 15)
+        count = max(1, activity_duration_minutes // 20)  # 데모 모드에서는 세트 생성
+    else:
+        interval_minutes = RECOVERY_INTERVAL_MINUTES_BY_STATE.get(
+            state_code, DEFAULT_RECOVERY_INTERVAL_MINUTES
+        )
+        count = max(1, activity_duration_minutes // interval_minutes)
+
+    now = timezone.now().replace(microsecond=0)
+    plan_date = today_for_user(user)
+
+    plan, _ = RecoveryPlan.objects.get_or_create(
+        user=user,
+        plan_date=plan_date,
+        status=PlanStatus.ACTIVE,
+    )
+
+    created_slots = []
+    last_sequence = plan.slots.aggregate(max_seq=Max("sequence_no"))["max_seq"] or 0
+
+    for i in range(1, count + 1):
+        if is_demo:
+            scheduled_time = now + timedelta(seconds=seconds * i)
+            interval_val = 1
+        else:
+            scheduled_time = now + timedelta(minutes=interval_minutes * i)
+            interval_val = interval_minutes
+
+        slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=last_sequence + i,
+            recommended_at=scheduled_time,
+            scheduled_at=scheduled_time,
+            interval_minutes=interval_val,
+            status=SlotStatus.SCHEDULED,
+            notification_basis=SlotNotificationBasis.SNAPSHOT,
+        )
+        sync_slot_notification(slot)
+        created_slots.append(slot)
+
+    return created_slots
