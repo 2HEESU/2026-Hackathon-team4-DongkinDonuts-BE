@@ -839,6 +839,92 @@ class RecoveryPlanApiTests(APITestCase):
         )
         self.assertTrue(all(slot.notification_basis == SlotNotificationBasis.FREQUENCY for slot in created_slots))
 
+    def test_ai_generate_prefers_actual_session_history_over_uniform_interval(self):
+        """
+        My Digital State 흐름은 상태 선택 모달과 달리 "그냥 인터벌 기계적 반복"이면
+        안 되고, 실제 과거 세션 기록을 분석해서 자주 활동했던 시간대를 우선 써야
+        한다(간격이 균일할 필요 없음). PC 사용 블록(10~14시) 안에서 사용자가
+        지난 3주간 매주 같은 요일 11:15 즈음 세션을 완료해왔다면, 그 블록 안의
+        상태 interval 균일 반복(45분 간격 여러 개) 대신 11:15 하나로 배치돼야
+        한다.
+        """
+        user, _ = User.objects.get_or_create(
+            id=self.device_code, defaults={"timezone": "Asia/Seoul"}
+        )
+        today_day = today_day_of_week_for_user(user)
+        for hour in [10, 11, 12, 13]:
+            PcUsagePattern.objects.create(user=user, day_of_week=today_day, hour=hour, is_used=True)
+
+        shift = ActivityType.objects.create(
+            code="shift_history_test",
+            stage_type=StageType.BRAIN_SHIFT,
+            target_state=self.state,
+            name="테스트용 이완",
+            default_duration_sec=90,
+        )
+        fixed_now = timezone.now().replace(hour=8, minute=0, second=0, microsecond=0)
+        history_plan = RecoveryPlan.objects.create(user=user, plan_date=today_for_user(user))
+        history_slot = RecoverySlot.objects.create(
+            recovery_plan=history_plan,
+            sequence_no=1,
+            recommended_at=fixed_now.replace(hour=11, minute=15),
+        )
+        history_routine = RoutineInstance.objects.create(
+            recovery_slot=history_slot,
+            activity=shift,
+            sequence_no=1,
+            difficulty_level=1,
+            planned_duration_sec=90,
+        )
+        for weeks_ago in [1, 2, 3]:
+            started_at = fixed_now.replace(hour=11, minute=15) - timedelta(days=7 * weeks_ago)
+            Session.objects.create(
+                user=user,
+                recovery_slot=history_slot,
+                routine_instance=history_routine,
+                activity=shift,
+                started_at=started_at,
+                ended_at=started_at + timedelta(minutes=2),
+                duration_sec=120,
+                accuracy=100,
+                status=SessionStatus.COMPLETED,
+            )
+
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 90,
+            },
+            format="json",
+        )
+
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": snapshot_response.data["data"]["id"],
+                    "next_activity_plan": activity_plan_response.data["data"]["id"],
+                    "use_ai_decision": True,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        plan_id = response.data["data"]["id"]
+        created_slots = list(
+            RecoverySlot.objects.filter(recovery_plan_id=plan_id).order_by("sequence_no")
+        )
+        self.assertEqual(len(created_slots), 1)
+        self.assertEqual(created_slots[0].recommended_at, fixed_now.replace(hour=11, minute=15))
+        self.assertEqual(created_slots[0].notification_basis, SlotNotificationBasis.FREQUENCY)
+
     def test_modal_generate_cancels_only_nearest_upcoming_pc_usage_block(self):
         """
         My Digital State로 06~08시/10~12시 두 블록에 알림을 미리 만들어둔 뒤,
