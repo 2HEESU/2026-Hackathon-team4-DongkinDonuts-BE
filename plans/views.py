@@ -34,6 +34,7 @@ from .services import (
     cancel_next_snapshot_slot_for_reentry,
     cancel_snapshot_slots_before,
     cancel_slot,
+    cleanup_nearby_pattern_notifications_on_entry,
     create_or_replace_today_plan,
     create_recovery_slot,
     deactivate_web_push_subscription,
@@ -80,7 +81,11 @@ class RecoveryPlanTodayView(EnvelopeMixin, APIView):
 
 
 class RecoveryPlanTodayAIGenerateView(EnvelopeMixin, APIView):
-    """POST /plans/recovery-plans/today/ai-generate/ — 정책 기반 오늘 회복 계획 생성."""
+    """
+    POST /plans/recovery-plans/today/ai-generate/ — 오늘 회복 계획 생성.
+    use_ai_decision=true일 때만 실제 LLM을 시도하고, 아니면(기본값) 서버 정책
+    엔진만 쓴다.
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -167,6 +172,10 @@ class RecoverySlotTodayListView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         expire_unanswered_recovery_slots(user=self.request.user)
+        # 사용자가 오늘 슬롯 목록을 조회하는 시점 = 서비스에 진입한 시점으로 보고,
+        # 지금과 너무 가까운 시간대의 빈도 기반 알림은 이미 사용자가 들어와있으니
+        # 굳이 다시 알릴 필요 없다고 판단해 취소한다.
+        cleanup_nearby_pattern_notifications_on_entry(user=self.request.user)
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(
