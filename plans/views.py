@@ -81,7 +81,11 @@ class RecoveryPlanTodayView(EnvelopeMixin, APIView):
 
 
 class RecoveryPlanTodayAIGenerateView(EnvelopeMixin, APIView):
-    """POST /plans/recovery-plans/today/ai-generate/ — 정책 기반 오늘 회복 계획 생성."""
+    """
+    POST /plans/recovery-plans/today/ai-generate/ — 오늘 회복 계획 생성.
+    use_ai_decision=true일 때만 실제 LLM을 시도하고, 아니면(기본값) 서버 정책
+    엔진만 쓴다.
+    """
 
     permission_classes = [IsAuthenticated]
 

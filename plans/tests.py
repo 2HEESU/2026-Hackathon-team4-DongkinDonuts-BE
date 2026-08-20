@@ -718,6 +718,7 @@ class RecoveryPlanApiTests(APITestCase):
                 {
                     "context_snapshot": snapshot_response.data["data"]["id"],
                     "next_activity_plan": activity_plan_response.data["data"]["id"],
+                    "use_ai_decision": True,
                 },
                 format="json",
             )
@@ -738,9 +739,51 @@ class RecoveryPlanApiTests(APITestCase):
 
     def test_ai_generate_falls_back_to_policy_engine_when_openai_key_missing(self):
         """
-        OPENAI_API_KEY가 없으면(클래스 기본값) create_structured_response 호출 없이
-        곧바로 정책 엔진으로 생성돼야 한다 — LLM 장애/미설정이 회복 계획 생성
-        자체를 막지 않는다는 안전장치 확인.
+        use_ai_decision=True를 보내도 OPENAI_API_KEY가 없으면(클래스 기본값)
+        create_structured_response가 OpenAIConfigurationError를 내고, 곧바로
+        정책 엔진으로 생성돼야 한다 — LLM 장애/미설정이 회복 계획 생성 자체를
+        막지 않는다는 안전장치 확인.
+        """
+        snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 45,
+            },
+            format="json",
+        )
+
+        response = self.client.post(
+            "/api/v1/plans/recovery-plans/today/ai-generate/",
+            {
+                "context_snapshot": snapshot_response.data["data"]["id"],
+                "next_activity_plan": activity_plan_response.data["data"]["id"],
+                "use_ai_decision": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
+        self.assertEqual(ai_run.model_name, "server_policy")
+        self.assertFalse(ai_run.output_snapshot_json["raw_response"]["external_api_called"])
+
+    @override_settings(OPENAI_API_KEY="test-key")
+    @patch("plans.ai_planner.create_structured_response")
+    def test_ai_generate_never_calls_llm_when_use_ai_decision_omitted(
+        self, mock_create_structured_response
+    ):
+        """
+        use_ai_decision을 아예 안 보내면(상태 선택 모달 흐름 등) OPENAI_API_KEY가
+        멀쩡히 설정돼 있어도 create_structured_response 자체를 호출하지 않아야
+        한다 — My Digital State의 PC 사용 패턴 흐름에서만 LLM을 쓴다는 제약을
+        코드로 검증.
         """
         snapshot_response = self.client.post(
             "/api/v1/context/context-snapshots/",
@@ -767,9 +810,9 @@ class RecoveryPlanApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        mock_create_structured_response.assert_not_called()
         ai_run = AIPlanRun.objects.get(id=response.data["data"]["ai_plan_run"])
         self.assertEqual(ai_run.model_name, "server_policy")
-        self.assertFalse(ai_run.output_snapshot_json["raw_response"]["external_api_called"])
 
     def test_ai_generate_uses_fixed_wake_shift_groups_and_reset(self):
         eye_state, _ = StateOption.objects.get_or_create(
