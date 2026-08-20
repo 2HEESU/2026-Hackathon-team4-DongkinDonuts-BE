@@ -164,6 +164,16 @@ def get_runnable_slot(plan):
 
 
 def get_next_slot_for_user(user):
+    """
+    "다음 리셋 시간" 카드용 — 반드시 지금 이 순간보다 미래인 슬롯만 반환한다.
+
+    get_next_open_slot(전체 open 슬롯 중 가장 이른 것, 지난 것 포함)과 다르게
+    여기서는 지난(overdue) 슬롯을 절대 보여주지 않는다. 이미 지난 슬롯은
+    알림을 눌러 들어오면 바로 그 세션으로 진행되므로(get_runnable_slot_for_user
+    쪽에서 처리) 이 카드가 따로 안내할 필요가 없고, 지난 시간이 그대로 남아있으면
+    "다음 리셋 시간"이 이미 지난 시각으로 보여서 혼란스러웠다.
+    """
+
     expire_unanswered_recovery_slots(user=user)
     plan = (
         RecoveryPlan.objects.filter(
@@ -176,7 +186,14 @@ def get_next_slot_for_user(user):
     )
     if plan is None:
         return None
-    return get_next_open_slot(plan)
+    now = timezone.now()
+    return (
+        plan.slots.filter(status__in=OPEN_SLOT_STATUSES)
+        .annotate(effective_at=Coalesce("user_changed_at", "scheduled_at", "recommended_at"))
+        .filter(effective_at__gt=now)
+        .order_by("effective_at", "sequence_no")
+        .first()
+    )
 
 
 def get_runnable_slot_for_user(user):
