@@ -996,18 +996,72 @@ def _common_routine_spec(*, activity_code, stage_type, sequence_no):
     }
 
 
+def _unique_list(values):
+    seen = set()
+    unique = []
+    for value in values:
+        if value and value not in seen:
+            unique.append(value)
+            seen.add(value)
+    return unique
+
+
 def _create_routine_instances(slot, context_snapshot, next_activity_plan, shift_recommendations):
     used_shift_codes = set()
     shift_specs = []
-    for recommendation in (shift_recommendations or [{}])[:2]:
-        spec = _select_shift_activity(
-            context_snapshot,
-            next_activity_plan,
-            recommendation,
-            used_shift_codes,
-        )
-        if spec is not None:
-            shift_specs.append(spec)
+
+    # 1) 명시적인 shift_recommendations가 2개 이상 들어온 경우 우선 채택
+    if shift_recommendations and len(shift_recommendations) >= 2:
+        for recommendation in shift_recommendations[:2]:
+            spec = _select_shift_activity(
+                context_snapshot,
+                next_activity_plan,
+                recommendation,
+                used_shift_codes,
+            )
+            if spec is not None:
+                shift_specs.append(spec)
+
+    # 2) 명시적 추천이 2개가 안 되는 경우: 최초 스냅샷 상태 + 현재 세션 진입 스냅샷 상태 조합 (다르면 2개, 같으면 1개)
+    if len(shift_specs) < 2:
+        initial_state_codes = []
+        plan_snapshot = slot.recovery_plan.generation_snapshot_json or {}
+        init_context = plan_snapshot.get("context_snapshot") or {}
+        if isinstance(init_context, dict) and init_context.get("state_options"):
+            initial_state_codes = init_context["state_options"]
+
+        current_state_codes = []
+        if context_snapshot is not None:
+            current_state_codes = [link.state_id for link in context_snapshot.state_links.all()]
+
+        all_states = _unique_list(current_state_codes + initial_state_codes)
+
+        for state_code in all_states[:2]:
+            if len(shift_specs) >= 2:
+                break
+            activities = ActivityType.objects.filter(
+                is_active=True,
+                stage_type=StageType.BRAIN_SHIFT,
+                target_state_id=state_code,
+            ).order_by("min_difficulty", "code")
+
+            candidates = [act for act in activities if act.code not in used_shift_codes]
+            if not candidates:
+                candidates = [act for act in ActivityType.objects.filter(is_active=True, stage_type=StageType.BRAIN_SHIFT) if act.code not in used_shift_codes]
+
+            if candidates:
+                act = candidates[0]
+                used_shift_codes.add(act.code)
+                shift_specs.append(
+                    {
+                        "activity": act,
+                        "sequence_no": len(shift_specs) + 2,
+                        "difficulty_level": act.min_difficulty,
+                        "planned_duration_sec": act.default_duration_sec,
+                        "reason": f"{act.target_state.label if hasattr(act, 'target_state') and act.target_state else '상태'} 맞춤 루틴입니다.",
+                        "data_sources": ["context_snapshot", "activity_catalog"],
+                    }
+                )
 
     if not shift_specs:
         fallback_spec = _select_shift_activity(
@@ -1021,6 +1075,8 @@ def _create_routine_instances(slot, context_snapshot, next_activity_plan, shift_
 
     for index, spec in enumerate(shift_specs):
         spec["sequence_no"] = index + 2
+
+
 
     routine_specs = [
         _common_routine_spec(

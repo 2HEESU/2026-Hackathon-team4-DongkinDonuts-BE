@@ -1235,3 +1235,24 @@ def cancel_nearest_upcoming_pc_usage_block_notifications(*, user, current_time=N
             canceled_slots.append(slot)
 
     return canceled_slots
+
+
+@transaction.atomic
+def update_slot_context_on_session_start(*, slot, context_snapshot):
+    """
+    [세션 진입 시 슬롯 피로 상태 최신화]
+    사용자가 특정 시각 알림으로 들어와 최신 피로 상태(UserContextSnapshot)를 선택하면
+    해당 슬롯의 context_snapshot을 갱신하고 맞춤 루틴(Brain Shift) 조합을 재설정한다.
+    """
+    if context_snapshot is None:
+        return slot
+
+    slot.context_snapshot = context_snapshot
+    slot.save(update_fields=["context_snapshot", "updated_at"])
+
+    # 세션 미작동 상태인 기존 루틴 인스턴스 정리 및 최신 상태 기반 조합 재생성
+    from plans.ai_planner import _create_routine_instances
+    slot.routine_instances.filter(status__in=["LOCKED", "AVAILABLE"]).delete()
+    _create_routine_instances(slot, context_snapshot, slot.next_activity_plan, [])
+
+    return slot
