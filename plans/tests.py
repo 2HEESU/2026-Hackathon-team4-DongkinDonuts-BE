@@ -17,8 +17,19 @@ from context.models import (
 )
 from context.utils import today_for_user
 from digital_state.models import PcUsagePattern
-from routines.models import ActivityType, RoutineInstance, StageType
-from sessions_app.models import Session, SessionStatus
+from routines.models import (
+    ActivityType,
+    RoutineInstance,
+    RoutineInstanceStatus,
+    StageType,
+)
+from sessions_app.models import (
+    DifficultyFeedback,
+    RecoveryFeeling,
+    Session,
+    SessionFeedback,
+    SessionStatus,
+)
 
 from .models import (
     AIInsight,
@@ -485,6 +496,52 @@ class RecoveryPlanApiTests(APITestCase):
         self.state = StateOption.objects.create(code="NECK_STIFF", label="목이 뻐근해요")
         self.activity_tag = ActivityTag.objects.create(code="ASSIGNMENT", name="과제")
 
+    def _ensure_reentry_activity_catalog(self, *, eye_state, body_state):
+        ActivityType.objects.update_or_create(
+            code="WAKE_HAND_ROUTINE",
+            defaults={
+                "stage_type": StageType.BRAIN_WAKE,
+                "target_state": None,
+                "name": "손 깨우기",
+                "purpose": "감각을 깨우는 루틴",
+                "default_duration_sec": 60,
+                "is_active": True,
+            },
+        )
+        ActivityType.objects.update_or_create(
+            code="RESET_BREATH",
+            defaults={
+                "stage_type": StageType.BRAIN_RESET,
+                "target_state": None,
+                "name": "호흡 정리",
+                "purpose": "호흡으로 마무리하는 루틴",
+                "default_duration_sec": 60,
+                "is_active": True,
+            },
+        )
+        ActivityType.objects.update_or_create(
+            code="SHIFT_EYE_RELAX",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "target_state": eye_state,
+                "name": "눈 이완",
+                "purpose": "눈 피로를 낮추는 루틴",
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+        ActivityType.objects.update_or_create(
+            code="SHIFT_BODY_STRETCH",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "target_state": body_state,
+                "name": "목 어깨 스트레칭",
+                "purpose": "굳은 목과 어깨를 푸는 루틴",
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+
     def test_create_today_plan_from_context_snapshot_and_next_activity_plan(self):
         snapshot_response = self.client.post(
             "/api/v1/context/context-snapshots/",
@@ -618,12 +675,20 @@ class RecoveryPlanApiTests(APITestCase):
             recommended_at=timezone.now() + timedelta(minutes=10),
             notification_basis=SlotNotificationBasis.FREQUENCY,
         )
+        far_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=2,
+            recommended_at=timezone.now() + timedelta(hours=3),
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        )
 
         response = self.client.get("/api/v1/plans/recovery-slots/today/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         nearby_slot.refresh_from_db()
+        far_slot.refresh_from_db()
         self.assertEqual(nearby_slot.status, SlotStatus.RECOMMENDED)
+        self.assertEqual(far_slot.status, SlotStatus.RECOMMENDED)
 
     @override_settings(OPENAI_API_KEY="test-key")
     @patch("plans.ai_planner.create_structured_response")
@@ -921,12 +986,11 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(created_slots[0].recommended_at, fixed_now.replace(hour=11, minute=15))
         self.assertEqual(created_slots[0].notification_basis, SlotNotificationBasis.FREQUENCY)
 
-    def test_modal_generate_cancels_only_nearest_upcoming_pc_usage_block(self):
+    def test_modal_generate_keeps_existing_frequency_notifications(self):
         """
         My Digital State로 06~08시/10~12시 두 블록에 알림을 미리 만들어둔 뒤,
-        06시 되기 전(05:00)에 사용자가 상태 선택 모달로 알림을 직접 설정하면
-        —"이미 서비스에 들어와서 인지했다"고 보고— 가장 가까운 06~08시 블록의
-        알림만 취소되고, 더 먼 10~12시 블록은 그대로 남아있어야 한다.
+        06시 되기 전(05:00)에 사용자가 일반 상태+활동 모달로 알림을 직접 설정해도
+        기존 빈도 기반 알림은 조회/생성 부작용으로 취소되면 안 된다.
         """
         user, _ = User.objects.get_or_create(
             id=self.device_code, defaults={"timezone": "Asia/Seoul"}
@@ -987,10 +1051,8 @@ class RecoveryPlanApiTests(APITestCase):
                 notification_basis=SlotNotificationBasis.FREQUENCY,
             )
         }
-        # 가장 가까운 06~08시 블록의 알림 2개는 전부 취소, 더 먼 10~12시 블록의
-        # 알림 2개는 그대로 남아있어야 한다.
-        self.assertEqual(frequency_slots[fixed_now.replace(hour=6, minute=45)], SlotStatus.CANCELED)
-        self.assertEqual(frequency_slots[fixed_now.replace(hour=7, minute=30)], SlotStatus.CANCELED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=6, minute=45)], SlotStatus.RECOMMENDED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=7, minute=30)], SlotStatus.RECOMMENDED)
         self.assertEqual(frequency_slots[fixed_now.replace(hour=10, minute=45)], SlotStatus.RECOMMENDED)
         self.assertEqual(frequency_slots[fixed_now.replace(hour=11, minute=30)], SlotStatus.RECOMMENDED)
 
@@ -1307,6 +1369,172 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(first_snapshot.status, SlotStatus.CANCELED)
         self.assertEqual(second_snapshot.status, SlotStatus.RECOMMENDED)
 
+    def test_reentry_creates_immediate_slot_without_notification_and_two_shift_states(self):
+        user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        active_state, _ = StateOption.objects.update_or_create(
+            code="BODY_STIFF",
+            defaults={"label": "목과 어깨가 굳었어요"},
+        )
+        current_state, _ = StateOption.objects.update_or_create(
+            code="EYE_TIRED",
+            defaults={"label": "눈이 피로해요"},
+        )
+        self._ensure_reentry_activity_catalog(
+            eye_state=current_state,
+            body_state=active_state,
+        )
+        fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
+        active_snapshot = UserContextSnapshot.objects.create(user=user, service_date=today_for_user(user))
+        UserContextSnapshotState.objects.create(
+            context_snapshot=active_snapshot,
+            state=active_state,
+            priority=1,
+        )
+        current_snapshot = UserContextSnapshot.objects.create(user=user, service_date=today_for_user(user))
+        UserContextSnapshotState.objects.create(
+            context_snapshot=current_snapshot,
+            state=current_state,
+            priority=1,
+        )
+        activity_plan = NextActivityPlan.objects.create(
+            user=user,
+            context_snapshot=active_snapshot,
+            service_date=today_for_user(user),
+            expected_activity_minutes=90,
+        )
+        NextActivityPlan.objects.filter(id=activity_plan.id).update(
+            created_at=fixed_now - timedelta(minutes=10),
+        )
+        activity_plan.refresh_from_db()
+
+        plan = RecoveryPlan.objects.create(user=user, plan_date=today_for_user(user))
+        frequency_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            context_snapshot=active_snapshot,
+            next_activity_plan=activity_plan,
+            sequence_no=1,
+            recommended_at=fixed_now + timedelta(minutes=5),
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        )
+        nearest_snapshot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            context_snapshot=active_snapshot,
+            next_activity_plan=activity_plan,
+            sequence_no=2,
+            recommended_at=fixed_now + timedelta(minutes=10),
+            notification_basis=SlotNotificationBasis.SNAPSHOT,
+        )
+        later_snapshot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            context_snapshot=active_snapshot,
+            next_activity_plan=activity_plan,
+            sequence_no=3,
+            recommended_at=fixed_now + timedelta(minutes=20),
+            notification_basis=SlotNotificationBasis.SNAPSHOT,
+        )
+        pending_notification = Notification.objects.create(
+            user=user,
+            recovery_slot=nearest_snapshot,
+            kind=NotificationKind.RECOVERY_SLOT,
+            message="회복 세션을 시작할 시간입니다.",
+            scheduled_at=nearest_snapshot.recommended_at,
+            status=NotificationStatus.PENDING,
+        )
+
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-slots/reentry/",
+                {
+                    "context_snapshot": str(current_snapshot.id),
+                    "next_activity_plan": str(activity_plan.id),
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        frequency_slot.refresh_from_db()
+        nearest_snapshot.refresh_from_db()
+        later_snapshot.refresh_from_db()
+        pending_notification.refresh_from_db()
+        self.assertEqual(frequency_slot.status, SlotStatus.RECOMMENDED)
+        self.assertEqual(nearest_snapshot.status, SlotStatus.CANCELED)
+        self.assertEqual(later_snapshot.status, SlotStatus.RECOMMENDED)
+        self.assertEqual(pending_notification.status, NotificationStatus.CANCELED)
+
+        created_slot = response.data["data"]
+        self.assertFalse(created_slot["notification_enabled"])
+        self.assertEqual(created_slot["notifications"], [])
+        self.assertEqual(
+            [routine["activity"]["code"] for routine in created_slot["routine_instances"]],
+            [
+                "WAKE_HAND_ROUTINE",
+                "SHIFT_EYE_RELAX",
+                "SHIFT_BODY_STRETCH",
+                "RESET_BREATH",
+            ],
+        )
+
+    def test_reentry_deduplicates_same_active_and_current_state(self):
+        user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        body_state, _ = StateOption.objects.update_or_create(
+            code="BODY_STIFF",
+            defaults={"label": "목과 어깨가 굳었어요"},
+        )
+        eye_state, _ = StateOption.objects.update_or_create(
+            code="EYE_TIRED",
+            defaults={"label": "눈이 피로해요"},
+        )
+        self._ensure_reentry_activity_catalog(
+            eye_state=eye_state,
+            body_state=body_state,
+        )
+        fixed_now = timezone.now().replace(hour=13, minute=0, second=0, microsecond=0)
+        active_snapshot = UserContextSnapshot.objects.create(user=user, service_date=today_for_user(user))
+        UserContextSnapshotState.objects.create(
+            context_snapshot=active_snapshot,
+            state=body_state,
+            priority=1,
+        )
+        current_snapshot = UserContextSnapshot.objects.create(user=user, service_date=today_for_user(user))
+        UserContextSnapshotState.objects.create(
+            context_snapshot=current_snapshot,
+            state=body_state,
+            priority=1,
+        )
+        activity_plan = NextActivityPlan.objects.create(
+            user=user,
+            context_snapshot=active_snapshot,
+            service_date=today_for_user(user),
+            expected_activity_minutes=90,
+        )
+        NextActivityPlan.objects.filter(id=activity_plan.id).update(
+            created_at=fixed_now - timedelta(minutes=10),
+        )
+        RecoveryPlan.objects.create(user=user, plan_date=today_for_user(user))
+
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
+            response = self.client.post(
+                "/api/v1/plans/recovery-slots/reentry/",
+                {
+                    "context_snapshot": str(current_snapshot.id),
+                    "next_activity_plan": str(activity_plan.id),
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created_slot = response.data["data"]
+        stage_types = [routine["stage_type"] for routine in created_slot["routine_instances"]]
+        self.assertEqual(stage_types.count(StageType.BRAIN_SHIFT), 1)
+        self.assertEqual(
+            [routine["activity"]["code"] for routine in created_slot["routine_instances"]],
+            [
+                "WAKE_HAND_ROUTINE",
+                "SHIFT_BODY_STRETCH",
+                "RESET_BREATH",
+            ],
+        )
+
     def test_history_supports_date_filters_and_table_fields(self):
         snapshot_response = self.client.post(
             "/api/v1/context/context-snapshots/",
@@ -1407,6 +1635,14 @@ class RecoveryPlanApiTests(APITestCase):
             data_sources_json=["llm_routine_reason"],
         )
 
+        SessionFeedback.objects.create(
+            recovery_slot=completed_slot,
+            user=user,
+            recovery_feeling="MUCH_BETTER",
+            difficulty_feedback="JUST_RIGHT",
+            skipped=False,
+        )
+
         date_response = self.client.get(f"/api/v1/plans/recovery-slots/history/?date={today}")
         self.assertEqual(date_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(date_response.data["data"]), 3)
@@ -1416,8 +1652,12 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_statuses[str(completed_slot.id)], "COMPLETED")
         self.assertEqual(history_statuses[str(upcoming_slot.id)], "UPCOMING")
 
+        completed_item = next(item for item in date_response.data["data"] if item["id"] == str(completed_slot.id))
+        self.assertEqual(completed_item["remark"], "훨씬 나아졌어요")
+
         missed_item = next(item for item in date_response.data["data"] if item["id"] == str(missed_slot.id))
         self.assertEqual(missed_item["history_status_label"], "진행 예정")
+
         self.assertIn("목이 뻐근해요", missed_item["input_summary"])
         self.assertIn("과제", missed_item["input_summary"])
         self.assertIn("45분 예정", missed_item["input_summary"])
@@ -1618,3 +1858,226 @@ class RecoveryPlanApiTests(APITestCase):
         list_after_delete_response = self.client.get("/api/v1/plans/notification-subscriptions/")
         self.assertEqual(list_after_delete_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_after_delete_response.data["data"], [])
+
+
+class RecoverySlotRoutineDifficultyApiTests(APITestCase):
+    def setUp(self):
+        self.device_code = uuid.uuid4()
+        self.user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        self.client.credentials(HTTP_X_DEVICE_CODE=str(self.device_code))
+        self.plan = RecoveryPlan.objects.create(
+            user=self.user,
+            plan_date=today_for_user(self.user),
+        )
+        self.activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_EYE_RELAX",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "눈 피로 풀기",
+                "purpose": "화면 사용으로 긴장된 눈과 시선을 쉬게 합니다.",
+                "required_landmarks": ["LEFT_EYE", "RIGHT_EYE"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+
+    def _create_slot_with_routine(self, sequence_no, status=SlotStatus.RECOMMENDED):
+        slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=sequence_no,
+            recommended_at=timezone.now() + timedelta(minutes=sequence_no * 20),
+            status=status,
+        )
+        routine = RoutineInstance.objects.create(
+            recovery_slot=slot,
+            activity=self.activity,
+            sequence_no=1,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.AVAILABLE,
+            locked_until_previous_done=False,
+        )
+        return slot, routine
+
+    def test_routine_defaults_to_medium_without_previous_feedback(self):
+        slot, _ = self._create_slot_with_routine(sequence_no=1)
+
+        response = self.client.get(f"/api/v1/plans/recovery-slots/{slot.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        routine_data = response.data["data"]["routine_instances"][0]
+        self.assertEqual(routine_data["frontend_session_base_id"], "eye-blink")
+        self.assertEqual(routine_data["recommended_difficulty"], "medium")
+        self.assertEqual(routine_data["recommended_difficulty_level"], 2)
+
+    def test_routine_uses_previous_completed_session_feedback(self):
+        previous_slot, previous_routine = self._create_slot_with_routine(
+            sequence_no=1,
+            status=SlotStatus.COMPLETED,
+        )
+        started_at = timezone.now() - timedelta(days=1, minutes=3)
+        Session.objects.create(
+            user=self.user,
+            recovery_slot=previous_slot,
+            routine_instance=previous_routine,
+            activity=self.activity,
+            started_at=started_at,
+            ended_at=started_at + timedelta(minutes=2),
+            duration_sec=120,
+            accuracy=95,
+            metrics={"difficulty": "medium"},
+            status=SessionStatus.COMPLETED,
+        )
+        SessionFeedback.objects.create(
+            recovery_slot=previous_slot,
+            user=self.user,
+            recovery_feeling=RecoveryFeeling.SAME,
+            difficulty_feedback=DifficultyFeedback.TOO_EASY,
+        )
+        current_slot, _ = self._create_slot_with_routine(sequence_no=2)
+
+        response = self.client.get(f"/api/v1/plans/recovery-slots/{current_slot.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        routine_data = response.data["data"]["routine_instances"][0]
+        self.assertEqual(routine_data["recommended_difficulty"], "high")
+        self.assertEqual(routine_data["recommended_difficulty_level"], 3)
+
+    def test_routine_uses_previous_feedback_for_same_frontend_session_kind(self):
+        previous_eye_activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_EYE_BLINK",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "눈 깜빡임",
+                "purpose": "눈 피로를 낮춥니다.",
+                "required_landmarks": ["LEFT_EYE", "RIGHT_EYE"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+        previous_focus_activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_FOCUS_SWITCH",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "집중 전환",
+                "purpose": "주의를 다시 모읍니다.",
+                "required_landmarks": ["LEFT_HAND", "RIGHT_HAND"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+        current_focus_activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_FOCUS_PINCH",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "집중 핀치",
+                "purpose": "주의를 다시 모읍니다.",
+                "required_landmarks": ["LEFT_HAND", "RIGHT_HAND"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+
+        previous_slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=1,
+            recommended_at=timezone.now() - timedelta(days=1),
+            status=SlotStatus.COMPLETED,
+        )
+        previous_eye_routine = RoutineInstance.objects.create(
+            recovery_slot=previous_slot,
+            activity=previous_eye_activity,
+            sequence_no=1,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.COMPLETED,
+            locked_until_previous_done=False,
+            completed_at=timezone.now() - timedelta(days=1, minutes=10),
+        )
+        previous_focus_routine = RoutineInstance.objects.create(
+            recovery_slot=previous_slot,
+            activity=previous_focus_activity,
+            sequence_no=2,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.COMPLETED,
+            locked_until_previous_done=False,
+            completed_at=timezone.now() - timedelta(days=1, minutes=8),
+        )
+        for index, routine in enumerate([previous_eye_routine, previous_focus_routine]):
+            started_at = timezone.now() - timedelta(days=1, minutes=12 - index)
+            Session.objects.create(
+                user=self.user,
+                recovery_slot=previous_slot,
+                routine_instance=routine,
+                activity=routine.activity,
+                started_at=started_at,
+                ended_at=started_at + timedelta(minutes=2),
+                duration_sec=120,
+                accuracy=95,
+                metrics={"difficulty": "medium"},
+                status=SessionStatus.COMPLETED,
+            )
+        SessionFeedback.objects.create(
+            recovery_slot=previous_slot,
+            user=self.user,
+            recovery_feeling=RecoveryFeeling.SAME,
+            difficulty_feedback=DifficultyFeedback.A_BIT_HARD,
+        )
+
+        current_slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=2,
+            recommended_at=timezone.now() + timedelta(minutes=20),
+            status=SlotStatus.RECOMMENDED,
+        )
+        RoutineInstance.objects.create(
+            recovery_slot=current_slot,
+            activity=self.activity,
+            sequence_no=1,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.AVAILABLE,
+            locked_until_previous_done=False,
+        )
+        RoutineInstance.objects.create(
+            recovery_slot=current_slot,
+            activity=current_focus_activity,
+            sequence_no=2,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.LOCKED,
+            locked_until_previous_done=True,
+        )
+
+        response = self.client.get(f"/api/v1/plans/recovery-slots/{current_slot.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        routines_by_code = {
+            routine["activity"]["code"]: routine
+            for routine in response.data["data"]["routine_instances"]
+        }
+        self.assertEqual(
+            routines_by_code["SHIFT_EYE_RELAX"]["recommended_difficulty"],
+            "low",
+        )
+        self.assertEqual(
+            routines_by_code["SHIFT_EYE_RELAX"]["recommended_difficulty_level"],
+            1,
+        )
+        self.assertEqual(
+            routines_by_code["SHIFT_FOCUS_PINCH"]["recommended_difficulty"],
+            "low",
+        )
+        self.assertEqual(
+            routines_by_code["SHIFT_FOCUS_PINCH"]["recommended_difficulty_level"],
+            1,
+        )

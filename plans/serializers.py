@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from context.models import NextActivityPlan, UserContextSnapshot
 from routines.serializers import ActivityTypeSerializer
+from sessions_app.difficulty import recommended_frontend_difficulty_for_routine
 from sessions_app.models import DifficultyFeedback, RecoveryFeeling, SessionFeedback
 
 from .models import (
@@ -213,8 +214,11 @@ class RecoverySlotRoutineInstanceSerializer(serializers.Serializer):
     id = serializers.UUIDField()
     activity = ActivityTypeSerializer()
     stage_type = serializers.CharField(source="activity.stage_type")
+    frontend_session_base_id = serializers.SerializerMethodField()
     sequence_no = serializers.IntegerField()
     difficulty_level = serializers.IntegerField()
+    recommended_difficulty = serializers.SerializerMethodField()
+    recommended_difficulty_level = serializers.SerializerMethodField()
     planned_duration_sec = serializers.IntegerField()
     status = serializers.CharField()
     locked_until_previous_done = serializers.BooleanField()
@@ -223,6 +227,29 @@ class RecoverySlotRoutineInstanceSerializer(serializers.Serializer):
 
     def get_insights(self, obj):
         return AIInsightSerializer(obj.insights.all(), many=True).data
+
+    def _recommended_difficulty(self, obj):
+        if hasattr(obj, "_recommended_frontend_difficulty"):
+            return obj._recommended_frontend_difficulty
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        obj._recommended_frontend_difficulty = (
+            recommended_frontend_difficulty_for_routine(obj, user=user)
+        )
+        return obj._recommended_frontend_difficulty
+
+    def get_frontend_session_base_id(self, obj):
+        recommended = self._recommended_difficulty(obj)
+        return recommended["base_id"] if recommended else None
+
+    def get_recommended_difficulty(self, obj):
+        recommended = self._recommended_difficulty(obj)
+        return recommended["key"] if recommended else None
+
+    def get_recommended_difficulty_level(self, obj):
+        recommended = self._recommended_difficulty(obj)
+        return recommended["level"] if recommended else None
 
 
 class SlotFeedbackSerializer(serializers.ModelSerializer):
@@ -404,6 +431,10 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
         routines = []
         for routine in obj.routine_instances.all():
             reason = None
+            difficulty = recommended_frontend_difficulty_for_routine(
+                routine,
+                user=obj.recovery_plan.user,
+            )
             for insight in routine.insights.all():
                 if insight.insight_type == InsightType.ROUTINE_REASON:
                     reason = insight.body
@@ -414,7 +445,16 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
                     "sequence_no": routine.sequence_no,
                     "stage_type": routine.activity.stage_type,
                     "activity": ActivityTypeSerializer(routine.activity).data,
+                    "frontend_session_base_id": (
+                        difficulty["base_id"] if difficulty else None
+                    ),
                     "difficulty_level": routine.difficulty_level,
+                    "recommended_difficulty": (
+                        difficulty["key"] if difficulty else None
+                    ),
+                    "recommended_difficulty_level": (
+                        difficulty["level"] if difficulty else None
+                    ),
                     "planned_duration_sec": routine.planned_duration_sec,
                     "status": routine.status,
                     "recommended_at": obj.effective_time,
@@ -426,29 +466,38 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
 
     def get_remark(self, obj):
         """
-        Your History 비고(remark) 문구 결정 로직:
+        Your History 비고(remark) 최종 출력 규칙:
         - 취소 (CANCELED) -> "진행 예정 취소"
-        - 진행중 (IN_PROGRESS) / 완료 (COMPLETED) -> "" (비워두기)
+        - 진행중 (IN_PROGRESS) -> "" (비워두기)
+        - 완료 (COMPLETED) -> 사용자가 제출한 회복 체감 (훨씬 나아졌어요 / 조금 나아졌어요 / 비슷해요), 피드백 없거나 건너뛰기 시 ""
         - 진행 예정 (UPCOMING):
-          * 트랙 1 (PC 사용 패턴 분석 기반 고정 알림) -> "brainfit의 추천 시간"
-          * 트랙 2 (사용자가 세션 후 입력한 타이머 수동 예약) -> "타이머 예약 시간"
+          * 트랙 1 (PC 패턴 분석 기반 고정 알림) -> "brainfit의 추천 시간"
+          * 트랙 2 (사용자 세션 후 타이머 수동 예약) -> "타이머 예약 시간"
         """
-
         status = self.get_history_status(obj)
 
         if status == "CANCELED":
             return "진행 예정 취소"
 
-        if status in ["COMPLETED", "IN_PROGRESS"]:
+        if status == "IN_PROGRESS":
+            return ""
+
+        if status == "COMPLETED":
+            feedback = getattr(obj, "feedback", None)
+            if feedback and not feedback.skipped and feedback.recovery_feeling:
+                feeling_map = {
+                    "MUCH_BETTER": "훨씬 나아졌어요",
+                    "SLIGHTLY_BETTER": "조금 나아졌어요",
+                    "SAME": "비슷해요",
+                }
+                return feeling_map.get(feedback.recovery_feeling, "")
             return ""
 
         if status == "UPCOMING":
-            # 트랙 2: 사용자가 직접 시간을 변경(user_changed_at)했거나 수동 지정(scheduled_at)한 타이머
             if obj.user_changed_at is not None or (
                 obj.scheduled_at is not None and obj.scheduled_at != obj.recommended_at
             ):
                 return "타이머 예약 시간"
-
             # 트랙 1: PC 패턴 분석으로 생성된 기본 추천 시각 (recommended_at)
             return "brainfit의 추천 시간"
 
@@ -537,6 +586,28 @@ class AIRecoveryPlanGenerateSerializer(OwnedContextInputMixin, serializers.Seria
 class RecoverySlotCreateSerializer(OwnedContextInputMixin, serializers.Serializer):
     recommended_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
     notification_enabled = serializers.BooleanField(default=True)
+
+
+class RecoverySlotReentrySerializer(serializers.Serializer):
+    context_snapshot = serializers.PrimaryKeyRelatedField(
+        queryset=UserContextSnapshot.objects.all(),
+    )
+    next_activity_plan = serializers.PrimaryKeyRelatedField(
+        queryset=NextActivityPlan.objects.all(),
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+
+    def validate_context_snapshot(self, value):
+        if value.user_id != self.context["request"].user.id:
+            raise serializers.ValidationError("본인의 상태 스냅샷만 사용할 수 있습니다.")
+        return value
+
+    def validate_next_activity_plan(self, value):
+        if value is not None and value.user_id != self.context["request"].user.id:
+            raise serializers.ValidationError("본인의 이후 활동 계획만 사용할 수 있습니다.")
+        return value
 
 
 class RecoverySlotScheduleSerializer(serializers.Serializer):

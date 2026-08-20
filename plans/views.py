@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from common.mixins import EnvelopeMixin
 from context.utils import today_for_user
 
-from .ai_planner import generate_ai_recovery_plan
+from .ai_planner import create_reentry_recovery_slot, generate_ai_recovery_plan
 from .models import Notification, PlanStatus, RecoveryPlan, RecoverySlot, WebPushSubscription
 from .serializers import (
     AIRecoveryPlanGenerateSerializer,
@@ -23,6 +23,7 @@ from .serializers import (
     RecoverySlotHistoryQuerySerializer,
     RecoverySlotHistorySerializer,
     RecoverySlotNotificationSerializer,
+    RecoverySlotReentrySerializer,
     RecoverySlotScheduleSerializer,
     RecoverySlotSerializer,
     SlotFeedbackSerializer,
@@ -360,6 +361,21 @@ class RecoverySlotConsumeSnapshotView(EnvelopeMixin, APIView):
                 "canceled_count": 1 if slot else 0,
                 "slot": RecoverySlotSerializer(slot).data if slot else None,
             }
+        )
+
+
+class RecoverySlotReentryView(EnvelopeMixin, APIView):
+    """POST /plans/recovery-slots/reentry/ — 활성 활동 중 재진입 즉시 세션 슬롯 생성."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = RecoverySlotReentrySerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        slot = create_reentry_recovery_slot(user=request.user, **serializer.validated_data)
+        return Response(
+            RecoverySlotSerializer(slot, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
         )
 
 

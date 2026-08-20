@@ -1,7 +1,7 @@
 import json
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.db import transaction
@@ -11,22 +11,26 @@ from rest_framework.exceptions import ValidationError
 
 from common.models import StateOption
 from context.models import NextActivityPlan, UserContextSnapshot, UserContextSnapshotState
+from context.services import get_current_valid_next_activity_plan
 from context.utils import today_for_user
 from digital_state.models import PcUsagePattern
 from digital_state.services import DAY_LABELS, DAY_ORDER, analyze_pc_usage_patterns
 from routines.models import ActivityType, RoutineInstance, RoutineInstanceStatus, StageType
 from sessions_app.models import Session, SessionFeedback
 
-from .models import AIInsight, AIPlanRun, InsightType, SlotNotificationBasis
+from .models import AIInsight, AIPlanRun, InsightType, PlanStatus, RecoveryPlan, SlotNotificationBasis
 from .openai_client import OpenAIClientError, OpenAIConfigurationError, create_structured_response
 from .services import (
+    build_plan_generation_snapshot,
     build_policy_recommended_slots,
-    cancel_nearest_upcoming_pc_usage_block_notifications,
+    cancel_next_snapshot_slot_for_reentry,
     create_or_replace_today_plan,
+    create_recovery_slot,
     get_today_pc_usage_patterns,
     is_within_pc_usage_pattern,
     recommend_next_reset_time,
     recovery_time_policy_for_context,
+    validate_context_inputs,
 )
 
 logger = logging.getLogger(__name__)
@@ -362,6 +366,29 @@ def _context_state_codes(context_snapshot):
     return list(context_snapshot.state_links.order_by("priority").values_list("state_id", flat=True))
 
 
+def _ordered_activities_by_codes(queryset, codes):
+    activities = list(queryset.filter(code__in=codes).order_by("code"))
+    by_code = {activity.code: activity for activity in activities}
+    return [
+        by_code[code]
+        for code in codes
+        if code in by_code
+    ]
+
+
+def _shift_candidates_for_state_code(state_code):
+    queryset = ActivityType.objects.filter(is_active=True, stage_type=StageType.BRAIN_SHIFT)
+    mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
+
+    if mapped_codes == RANDOM_SHIFT_SENTINEL:
+        return _ordered_activities_by_codes(queryset, RANDOM_PREPARED_SHIFT_ACTIVITY_CODES)
+
+    if mapped_codes:
+        return _ordered_activities_by_codes(queryset, mapped_codes)
+
+    return list(queryset.filter(target_state_id=state_code).order_by("code"))
+
+
 def _combined_state_codes(context_snapshot, next_activity_plan=None):
     state_codes = []
 
@@ -381,45 +408,97 @@ def _combined_state_codes(context_snapshot, next_activity_plan=None):
 def _shift_activities_for_context(context_snapshot, next_activity_plan=None):
     state_codes = _combined_state_codes(context_snapshot, next_activity_plan)
     queryset = ActivityType.objects.filter(is_active=True, stage_type=StageType.BRAIN_SHIFT)
-    random_requested = False
+    activities = []
+    used_codes = set()
 
     for state_code in state_codes:
-        mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
-        if mapped_codes is None:
-            continue
-        if mapped_codes == RANDOM_SHIFT_SENTINEL:
-            random_requested = True
-            continue
+        for activity in _shift_candidates_for_state_code(state_code):
+            if activity.code in used_codes:
+                continue
+            activities.append(activity)
+            used_codes.add(activity.code)
 
-        activities = list(
-            queryset.filter(code__in=mapped_codes).order_by("code")
-        )
-        by_code = {activity.code: activity for activity in activities}
-        ordered = [
-            by_code[code]
-            for code in mapped_codes
-            if code in by_code
-        ]
-        if ordered:
-            return ordered
-
-    if random_requested:
-        activities = list(
-            queryset.filter(code__in=RANDOM_PREPARED_SHIFT_ACTIVITY_CODES)
-        )
-        by_code = {activity.code: activity for activity in activities}
-        return [
-            by_code[code]
-            for code in RANDOM_PREPARED_SHIFT_ACTIVITY_CODES
-            if code in by_code
-        ]
+    if activities:
+        return activities
 
     if state_codes:
-        activities = list(queryset.filter(target_state_id__in=state_codes))
-        if activities:
+        fallback_activities = list(queryset.filter(target_state_id__in=state_codes))
+        if fallback_activities:
             priority = {code: index for index, code in enumerate(state_codes)}
-            return sorted(activities, key=lambda activity: (priority.get(activity.target_state_id, 999), activity.code))
+            return sorted(fallback_activities, key=lambda activity: (priority.get(activity.target_state_id, 999), activity.code))
+
     return list(queryset.filter(code__in=RANDOM_PREPARED_SHIFT_ACTIVITY_CODES).order_by("code"))
+
+
+def _primary_shift_recommendations_for_state_codes(state_codes, context_snapshot, next_activity_plan):
+    recommendations = []
+    used_codes = set()
+    state_defaults = _state_default_difficulty_map(
+        context_snapshot,
+        next_activity_plan,
+    )
+
+    for state_code in state_codes:
+        candidates = [
+            activity
+            for activity in _shift_candidates_for_state_code(state_code)
+            if activity.code not in used_codes
+        ]
+        if not candidates:
+            continue
+        mapped_codes = STATE_SHIFT_ACTIVITY_CODES.get(state_code)
+        activity = (
+            random.choice(candidates)
+            if mapped_codes == RANDOM_SHIFT_SENTINEL
+            else candidates[0]
+        )
+        used_codes.add(activity.code)
+        recommendations.append(
+            {
+                "activity_code": activity.code,
+                "difficulty_level": _difficulty_for_activity(
+                    activity,
+                    default_difficulty=state_defaults.get(
+                        activity.target_state_id,
+                        activity.min_difficulty,
+                    ),
+                ),
+                "planned_duration_sec": activity.default_duration_sec,
+                "reason": (
+                    activity.purpose
+                    or "현재 상태에 맞는 Brain Shift 활동입니다."
+                ),
+            }
+        )
+
+        if len(recommendations) >= 2:
+            break
+
+    return recommendations or [{}]
+
+
+def _reentry_state_codes(context_snapshot, next_activity_plan):
+    state_codes = []
+    attached_snapshot = getattr(next_activity_plan, "context_snapshot", None)
+
+    for snapshot in [context_snapshot, attached_snapshot]:
+        if snapshot is None:
+            continue
+        for code in _context_state_codes(snapshot):
+            if code not in state_codes:
+                state_codes.append(code)
+            if len(state_codes) >= 2:
+                return state_codes
+
+    return state_codes
+
+
+def _reentry_shift_recommendations(context_snapshot, next_activity_plan):
+    return _primary_shift_recommendations_for_state_codes(
+        _reentry_state_codes(context_snapshot, next_activity_plan),
+        context_snapshot,
+        next_activity_plan,
+    )
 
 
 def _serialize_shift_activity_catalog(context_snapshot, next_activity_plan):
@@ -1030,6 +1109,88 @@ def _persist_ai_plan(
     return plan
 
 
+def _is_next_activity_plan_active(next_activity_plan, now):
+    if next_activity_plan.expected_activity_minutes is None:
+        return False
+    valid_until = next_activity_plan.created_at + timedelta(
+        minutes=next_activity_plan.expected_activity_minutes,
+    )
+    return valid_until > now
+
+
+@transaction.atomic
+def create_reentry_recovery_slot(
+    *,
+    user,
+    context_snapshot,
+    next_activity_plan=None,
+):
+    """
+    활성 활동 구간 중 서비스에 재진입해 바로 휴식 루틴을 시작하는 흐름.
+
+    기존 활동에 묶인 상태와 방금 입력한 현재 상태를 Brain Shift에 반영하고,
+    새 알림은 만들지 않는다. 이미 잡혀 있던 상태 기반 알림은 가장 가까운
+    미래 슬롯 1개만 취소한다.
+    """
+
+    if next_activity_plan is None:
+        next_activity_plan = get_current_valid_next_activity_plan(user)
+
+    if next_activity_plan is None:
+        raise ValidationError("현재 활성화된 이후 활동 계획이 없습니다.")
+
+    validate_context_inputs(user, context_snapshot, next_activity_plan)
+
+    now = timezone.now().replace(microsecond=0)
+    if not _is_next_activity_plan_active(next_activity_plan, now):
+        raise ValidationError("현재 활성화된 이후 활동 계획이 없습니다.")
+
+    _validate_recovery_activity_catalog(context_snapshot, next_activity_plan)
+
+    plan = (
+        RecoveryPlan.objects.select_for_update()
+        .filter(
+            user=user,
+            plan_date=today_for_user(user),
+            status=PlanStatus.ACTIVE,
+        )
+        .first()
+    )
+    if plan is None:
+        plan = RecoveryPlan.objects.create(
+            user=user,
+            plan_date=today_for_user(user),
+            generation_snapshot_json=build_plan_generation_snapshot(
+                user,
+                context_snapshot,
+                next_activity_plan,
+            ),
+        )
+
+    cancel_next_snapshot_slot_for_reentry(user=user, now=now)
+    slot = create_recovery_slot(
+        plan=plan,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        recommended_at=now,
+        notification_enabled=False,
+        notification_basis=SlotNotificationBasis.SNAPSHOT,
+    )
+    _create_slot_insight(
+        slot,
+        "활성 활동 중 재진입해 현재 상태를 반영한 즉시 회복 세션입니다.",
+        ["context_snapshot", "next_activity_plan"],
+    )
+    _create_routine_instances(
+        slot,
+        context_snapshot,
+        next_activity_plan,
+        _reentry_shift_recommendations(context_snapshot, next_activity_plan),
+    )
+
+    return slot
+
+
 def generate_ai_recovery_plan(
     *,
     user,
@@ -1072,12 +1233,6 @@ def generate_ai_recovery_plan(
         notification_enabled=notification_enabled,
         generator_name=generator_name,
     )
-
-    if not use_ai_decision:
-        # 상태 선택 모달로 사용자가 스스로 알림을 설정한 것 — 이미 서비스에
-        # 들어와서 인지한 상태라, 곧 다가올 PC 사용 블록 중 가장 가까운 것 하나는
-        # 중복으로 안 울리게 정리한다(더 먼 블록들은 그대로 둠).
-        cancel_nearest_upcoming_pc_usage_block_notifications(user=user)
 
     return plan
 
