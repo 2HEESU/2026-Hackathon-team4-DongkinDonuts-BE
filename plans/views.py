@@ -34,7 +34,6 @@ from .services import (
     cancel_next_snapshot_slot_for_reentry,
     cancel_snapshot_slots_before,
     cancel_slot,
-    cleanup_nearby_pattern_notifications_on_entry,
     create_or_replace_today_plan,
     create_recovery_slot,
     deactivate_web_push_subscription,
@@ -172,10 +171,13 @@ class RecoverySlotTodayListView(EnvelopeMixin, generics.ListAPIView):
 
     def get_queryset(self):
         expire_unanswered_recovery_slots(user=self.request.user)
-        # 사용자가 오늘 슬롯 목록을 조회하는 시점 = 서비스에 진입한 시점으로 보고,
-        # 지금과 너무 가까운 시간대의 빈도 기반 알림은 이미 사용자가 들어와있으니
-        # 굳이 다시 알릴 필요 없다고 판단해 취소한다.
-        cleanup_nearby_pattern_notifications_on_entry(user=self.request.user)
+        # cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)를
+        # 여기 걸어놨었는데, 이 엔드포인트가 "진짜 진입 시점"에만 불리는 게
+        # 아니라 useRoutineHome 마운트 때마다(=생성 직후 리렌더 때도) 불려서
+        # 방금 막 만든 알림을 스스로 취소해버리는 버그가 있었다 — 제거함.
+        # 진입 시점에 가까운 PC 사용 블록을 정리하는 건 이제
+        # cancel_nearest_upcoming_pc_usage_block_notifications가 정확한
+        # 트리거 시점(모달 생성 성공 직후)에만 맡는다.
         return (
             RecoverySlot.objects.select_related("recovery_plan", "recovery_plan__ai_plan_run")
             .prefetch_related(
