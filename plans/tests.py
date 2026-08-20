@@ -653,6 +653,39 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(history_response.status_code, status.HTTP_200_OK)
         self.assertEqual(history_response.data["data"][0]["id"], slot_id)
 
+    def test_next_reset_time_skips_overdue_slot_and_shows_next_future_one(self):
+        """
+        "다음 리셋 시간" 카드는 지난(overdue) 슬롯을 절대 보여주면 안 된다.
+        유예 시간(NOTIFICATION_RESPONSE_GRACE_MINUTES) 안이라 슬롯 자체는
+        아직 안 만료돼서 "열려있는" 상태로 남아있어도, 화면에는 항상 지금
+        이후의 가장 가까운 시간만 떠야 한다 — 지난 슬롯은 알림을 눌러
+        들어오면(get_runnable_slot_for_user 쪽) 바로 진행되니 이 카드가
+        따로 안내할 필요가 없다.
+        """
+        user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        plan = RecoveryPlan.objects.create(
+            user=user,
+            plan_date=today_for_user(user),
+            status=PlanStatus.ACTIVE,
+        )
+        overdue_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=1,
+            recommended_at=timezone.now() - timedelta(minutes=5),
+        )
+        future_slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=2,
+            recommended_at=timezone.now() + timedelta(minutes=20),
+        )
+
+        reset_time_response = self.client.get("/api/v1/plans/recovery-slots/next-reset-time/")
+
+        self.assertEqual(reset_time_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(reset_time_response.data["data"]["recovery_slot"], str(future_slot.id))
+        self.assertNotEqual(reset_time_response.data["data"]["recovery_slot"], str(overdue_slot.id))
+        self.assertFalse(reset_time_response.data["data"]["is_overdue"])
+
     def test_today_slot_list_does_not_cancel_freshly_created_notifications(self):
         """
         cleanup_nearby_pattern_notifications_on_entry(진입 시점 30분 임계값)는
@@ -985,6 +1018,43 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(len(created_slots), 1)
         self.assertEqual(created_slots[0].recommended_at, fixed_now.replace(hour=11, minute=15))
         self.assertEqual(created_slots[0].notification_basis, SlotNotificationBasis.FREQUENCY)
+
+        # 이 FREQUENCY 슬롯이 아직 안 지난 상태에서, 다른 생성(예: 상태 선택
+        # 모달)이 한 번 더 일어나면 create_or_replace_today_plan이 이 슬롯을
+        # 새 plan에 "보존"해서 다시 만든다. 그 보존된 새 슬롯도 실제 회복
+        # 세션을 실행할 수 있어야 한다 — routine_instances가 비어있으면
+        # "지금 시작할 수 있는 루틴이 없어요" 화면으로 막힌다.
+        second_snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        second_activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": second_snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 30,
+            },
+            format="json",
+        )
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now + timedelta(minutes=5)):
+            second_response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": second_snapshot_response.data["data"]["id"],
+                    "next_activity_plan": second_activity_plan_response.data["data"]["id"],
+                },
+                format="json",
+            )
+
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        preserved_slot = RecoverySlot.objects.get(
+            recovery_plan_id=second_response.data["data"]["id"],
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        )
+        self.assertTrue(preserved_slot.routine_instances.exists())
+        self.assertTrue(preserved_slot.insights.exists())
 
     def test_modal_generate_keeps_existing_frequency_notifications(self):
         """

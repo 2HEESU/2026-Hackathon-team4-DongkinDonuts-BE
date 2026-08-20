@@ -34,6 +34,8 @@ WEEKDAY_TO_DAY_OF_WEEK = {
     6: DayOfWeek.SUN,
 }
 
+from django.conf import settings
+
 OPEN_SLOT_STATUSES = [
     SlotStatus.RECOMMENDED,
     SlotStatus.SCHEDULED,
@@ -47,7 +49,17 @@ RECOVERY_INTERVAL_MINUTES_BY_STATE = {
     "LOW_FOCUS": 45,       # 집중 저하 (45분 인지 회복)
     "OKAY": 90,            # 아직 괜찮아요 (90분)
 }
+
+# DEMO_MODE=True 설정 시 시연/촬영용 초 단위 타이머 매핑 (초 단위 알림)
+DEMO_MODE_SECONDS_BY_STATE = {
+    "EYE_TIRED": 10,       # 10초
+    "BODY_STIFF": 15,      # 15초
+    "SLEEPY": 15,          # 15초
+    "LOW_FOCUS": 20,       # 20초
+    "OKAY": 30,            # 30초
+}
 DEFAULT_RECOVERY_INTERVAL_MINUTES = 45
+
 MAX_POLICY_RECOMMENDED_TIMES = 12
 PREVIOUS_SESSION_FREQUENCY_LOOKBACK_DAYS = 30
 PREVIOUS_SESSION_FREQUENCY_MIN_COUNT = 3
@@ -164,6 +176,16 @@ def get_runnable_slot(plan):
 
 
 def get_next_slot_for_user(user):
+    """
+    "다음 리셋 시간" 카드용 — 반드시 지금 이 순간보다 미래인 슬롯만 반환한다.
+
+    get_next_open_slot(전체 open 슬롯 중 가장 이른 것, 지난 것 포함)과 다르게
+    여기서는 지난(overdue) 슬롯을 절대 보여주지 않는다. 이미 지난 슬롯은
+    알림을 눌러 들어오면 바로 그 세션으로 진행되므로(get_runnable_slot_for_user
+    쪽에서 처리) 이 카드가 따로 안내할 필요가 없고, 지난 시간이 그대로 남아있으면
+    "다음 리셋 시간"이 이미 지난 시각으로 보여서 혼란스러웠다.
+    """
+
     expire_unanswered_recovery_slots(user=user)
     plan = (
         RecoveryPlan.objects.filter(
@@ -176,7 +198,14 @@ def get_next_slot_for_user(user):
     )
     if plan is None:
         return None
-    return get_next_open_slot(plan)
+    now = timezone.now()
+    return (
+        plan.slots.filter(status__in=OPEN_SLOT_STATUSES)
+        .annotate(effective_at=Coalesce("user_changed_at", "scheduled_at", "recommended_at"))
+        .filter(effective_at__gt=now)
+        .order_by("effective_at", "sequence_no")
+        .first()
+    )
 
 
 def get_runnable_slot_for_user(user):
@@ -1256,3 +1285,60 @@ def update_slot_context_on_session_start(*, slot, context_snapshot):
     _create_routine_instances(slot, context_snapshot, slot.next_activity_plan, [])
 
     return slot
+
+
+@transaction.atomic
+def create_dynamic_action_timers(
+    *,
+    user,
+    state_code,
+    activity_duration_minutes,
+):
+    """
+    [트랙 2] 세션 완료 후 사용자 입력 기반 동적 연쇄 타이머 생성
+    DEMO_MODE=True 설정 시 초 단위(10초, 15초, 20초 등)로 작동함.
+    """
+    is_demo = getattr(settings, "DEMO_MODE", False)
+
+    if is_demo:
+        seconds = DEMO_MODE_SECONDS_BY_STATE.get(state_code, 15)
+        count = max(1, activity_duration_minutes // 20)  # 데모 모드에서는 세트 생성
+    else:
+        interval_minutes = RECOVERY_INTERVAL_MINUTES_BY_STATE.get(
+            state_code, DEFAULT_RECOVERY_INTERVAL_MINUTES
+        )
+        count = max(1, activity_duration_minutes // interval_minutes)
+
+    now = timezone.now().replace(microsecond=0)
+    plan_date = today_for_user(user)
+
+    plan, _ = RecoveryPlan.objects.get_or_create(
+        user=user,
+        plan_date=plan_date,
+        status=PlanStatus.ACTIVE,
+    )
+
+    created_slots = []
+    last_sequence = plan.slots.aggregate(max_seq=Max("sequence_no"))["max_seq"] or 0
+
+    for i in range(1, count + 1):
+        if is_demo:
+            scheduled_time = now + timedelta(seconds=seconds * i)
+            interval_val = 1
+        else:
+            scheduled_time = now + timedelta(minutes=interval_minutes * i)
+            interval_val = interval_minutes
+
+        slot = RecoverySlot.objects.create(
+            recovery_plan=plan,
+            sequence_no=last_sequence + i,
+            recommended_at=scheduled_time,
+            scheduled_at=scheduled_time,
+            interval_minutes=interval_val,
+            status=SlotStatus.SCHEDULED,
+            notification_basis=SlotNotificationBasis.SNAPSHOT,
+        )
+        sync_slot_notification(slot)
+        created_slots.append(slot)
+
+    return created_slots

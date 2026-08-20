@@ -195,3 +195,9 @@ WEB_PUSH_VAPID_PRIVATE_KEY = env("WEB_PUSH_VAPID_PRIVATE_KEY", default="")
 WEB_PUSH_VAPID_SUBJECT = env("WEB_PUSH_VAPID_SUBJECT", default="mailto:admin@example.com")
 WEB_PUSH_TTL_SECONDS = env.int("WEB_PUSH_TTL_SECONDS", default=3600)
 WEB_PUSH_TIMEOUT_SECONDS = env.int("WEB_PUSH_TIMEOUT_SECONDS", default=10)
+
+# 시연/테스트 전용 데모 모드 (기본값 False로 안전 세팅 -> AI 1차 채점 시 20분/30분 학술 지침 정상 작동)
+# 현장 시연 시 서버 환경변수 DEMO_MODE=true 로 켜면 10초/15초 시연 모드 작동
+DEMO_MODE = env.bool("DEMO_MODE", default=False)
+
+
