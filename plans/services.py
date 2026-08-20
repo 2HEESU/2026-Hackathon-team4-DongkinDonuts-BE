@@ -434,6 +434,18 @@ def _matches_pc_usage_pattern(value, pattern_keys):
     return (WEEKDAY_TO_DAY_OF_WEEK[local_value.weekday()], local_value.hour) in pattern_keys
 
 
+def is_within_pc_usage_pattern(user, value):
+    """
+    value(datetime)가 사용자의 PC 사용 패턴 블록(요일+시간대) 안에 들어가는지 확인한다.
+    AI가 자율적으로 정한 recommended_at을 서버에서 검증할 때 씀 — 패턴을 하나도
+    안 넣은 사용자는 애초에 검증할 블록이 없으므로 항상 False.
+    """
+    pattern_keys = _pc_usage_pattern_hour_keys(user)
+    if not pattern_keys:
+        return False
+    return _matches_pc_usage_pattern(value, pattern_keys)
+
+
 def _today_pattern_hours(user):
     today_day_of_week = today_day_of_week_for_user(user)
     return set(
@@ -1067,3 +1079,31 @@ def deactivate_web_push_subscription(*, subscription):
     subscription.is_active = False
     subscription.save(update_fields=["is_active", "updated_at"])
     return subscription
+
+
+@transaction.atomic
+def cleanup_nearby_pattern_notifications_on_entry(*, user, current_time=None, threshold_minutes=30):
+    """
+    [진입 시점 알림 삭제 정책]
+    사용자 서비스 진입 시점(current_time)과 가장 가깝고 && 일정 시간(threshold_minutes) 이상
+    차이 나지 않는 해당 PC 사용 패턴 블록의 빈도 기반 알림들을 CANCELED(삭제/취소) 처리한다.
+    """
+    now = current_time or timezone.now()
+    threshold = timedelta(minutes=threshold_minutes)
+
+    open_slots = RecoverySlot.objects.filter(
+        recovery_plan__user=user,
+        recovery_plan__plan_date=today_for_user(user),
+        status__in=OPEN_SLOT_STATUSES,
+    ).select_related("recovery_plan")
+
+    canceled_slots = []
+    for slot in open_slots:
+        slot_time = slot.effective_time
+        if slot_time and abs((slot_time - now).total_seconds()) <= threshold.total_seconds():
+            slot.status = SlotStatus.CANCELED
+            slot.save(update_fields=["status", "updated_at"])
+            sync_slot_notification(slot)
+            canceled_slots.append(slot)
+
+    return canceled_slots

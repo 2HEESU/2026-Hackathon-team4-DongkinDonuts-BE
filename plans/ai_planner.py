@@ -1,6 +1,9 @@
 import json
+import logging
 import random
+from datetime import datetime
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
@@ -14,14 +17,18 @@ from digital_state.services import DAY_LABELS, DAY_ORDER, analyze_pc_usage_patte
 from routines.models import ActivityType, RoutineInstance, RoutineInstanceStatus, StageType
 from sessions_app.models import Session, SessionFeedback
 
-from .models import AIInsight, AIPlanRun, InsightType
+from .models import AIInsight, AIPlanRun, InsightType, SlotNotificationBasis
+from .openai_client import OpenAIClientError, OpenAIConfigurationError, create_structured_response
 from .services import (
     build_policy_recommended_slots,
     create_or_replace_today_plan,
     get_today_pc_usage_patterns,
+    is_within_pc_usage_pattern,
     recommend_next_reset_time,
     recovery_time_policy_for_context,
 )
+
+logger = logging.getLogger(__name__)
 
 
 STAGE_SEQUENCE = {
@@ -32,6 +39,9 @@ STAGE_SEQUENCE = {
 
 COMMON_STAGE_TYPES = [StageType.BRAIN_WAKE, StageType.BRAIN_RESET]
 POLICY_GENERATOR_NAME = "server_policy"
+# RECOVERY_PLAN_SCHEMA의 slots.maxItems와 맞춘 안전 상한선 — "몇 개를 만들지"는
+# AI가 자유롭게 정하되, 폭주 응답으로부터 서버/사용자를 보호하는 최후의 방어선.
+MAX_AI_SLOTS = 12
 WAKE_ACTIVITY_CODE = "WAKE_HAND_ROUTINE"
 RESET_ACTIVITY_CODE = "RESET_BREATH"
 RANDOM_SHIFT_SENTINEL = "__RANDOM_PREPARED_SHIFT__"
@@ -162,16 +172,12 @@ SYSTEM_PROMPT = """
 규칙:
 - 하나의 회복 세션은 서버에서 항상 Brain Wake → Brain Shift 1~2개 → Brain Reset 순서로 생성된다.
 - Brain Wake와 Brain Reset은 모든 상태에서 공통으로 제공되며 서버가 선택한다.
-- 개인화는 Brain Shift에만 적용한다. shift_recommendations는 반드시 shift_activity_catalog에 있는
-  activity_code 중 1~2개를 골라야 한다.
-- generation_mode가 SNAPSHOT_ACTIVITY_WINDOW이면 이후 활동 시간 안에 상태별 간격으로 slots를 만든다.
-- generation_mode가 SNAPSHOT_AND_FREQUENCY이면 상태별 간격 슬롯과 빈도 기반 슬롯을 함께 만든다.
-- time_policy.interval_minutes를 추천 간격으로 사용한다. 복수 상태는 더 짧은 간격이 우선이다.
-- recommended_at은 current_time 이후, plan_date 당일, YYYY-MM-DDTHH:MM:SS 형식으로 쓰되
-  서버가 time_policy와 PC 사용 구간에 맞춰 최종 보정한다.
+- 개인화는 Brain Shift에만 적용한다. shift_recommendation은 반드시 shift_activity_catalog에 있는
+  activity_code 중 하나를 골라야 한다.
+- [필수 제약 조건] 모든 recommended_at 추천 시각은 사용자가 선택한 pc_usage_patterns (PC 사용 시간대 블록) 범위 내부여야 한다. PC를 사용하지 않는 시간대에는 절대 알림을 생성하지 않는다.
+- [AI 자율 판단] PC 사용 밀집 구간과 과거 세션/상태 빈도를 고려하여 알림의 수량(slots 개수)과 가장 피로도가 누적될 것으로 예상되는 최적의 발송 시각을 자유롭게 판단하여 추천한다.
+- recommended_at은 current_time 이후, plan_date 당일, YYYY-MM-DDTHH:MM:SS 형식으로 작성한다.
 - difficulty_level은 사용자의 상태와 피드백을 반영하되 활동의 난이도 범위 안에서 정한다.
-- 사용자가 회복 세션을 수행한 뒤 다시 이후 활동을 입력할 수 있으므로, 과도하게 먼 미래의
-  결정을 한 슬롯에 몰아넣지 않는다.
 """.strip()
 
 
@@ -630,16 +636,85 @@ def build_policy_output(user, context_snapshot, next_activity_plan, input_snapsh
     }
 
 
-def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan):
+def _parse_ai_recommended_at(raw_value):
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
+def _normalize_llm_authored_slots(raw_slots, *, user, now, today, policy):
+    """
+    LLM이 스스로 정한 슬롯 "개수"와 "시각"을 그대로 신뢰해서 쓴다(정책 엔진의
+    build_policy_recommended_slots를 거치지 않음) — 대신 서버가 최소한의 안전장치로
+    (1) 현재 시각 이후인지, (2) plan_date 당일인지, (3) 사용자의 PC 사용 패턴
+    블록 안에 들어가는지를 검증해서, 통과 못 하는 슬롯은 조용히 버린다.
+    프롬프트의 [필수 제약 조건]을 코드로도 강제하는 것.
+    """
+    seen_times = set()
+    candidates = []
+    for raw_slot in raw_slots[:MAX_AI_SLOTS]:
+        if not isinstance(raw_slot, dict):
+            continue
+
+        recommended_at = _parse_ai_recommended_at(raw_slot.get("recommended_at"))
+        if recommended_at is None or recommended_at <= now:
+            continue
+        if recommended_at.date() != today:
+            continue
+        if not is_within_pc_usage_pattern(user, recommended_at):
+            continue
+        if recommended_at in seen_times:
+            continue
+        seen_times.add(recommended_at)
+
+        candidates.append(
+            {
+                "recommended_at": recommended_at,
+                "interval_minutes": _safe_int(
+                    raw_slot.get("interval_minutes"),
+                    default=policy["interval_minutes"],
+                    minimum=5,
+                    maximum=240,
+                ),
+                "notification_basis": SlotNotificationBasis.FREQUENCY,
+                "reason": _time_policy_reason(policy, raw_slot.get("reason")),
+                "data_sources": ["pc_usage_patterns", "previous_sessions", "ai_decision"],
+                "shift_recommendations": _coerce_shift_recommendations(raw_slot),
+            }
+        )
+
+    candidates.sort(key=lambda item: item["recommended_at"])
+    return candidates
+
+
+def normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan, *, is_ai_generated=False):
     now = timezone.now().replace(microsecond=0)
     policy = recovery_time_policy_for_context(context_snapshot)
+    raw_slots = ai_output.get("slots", [])
+
+    if is_ai_generated:
+        llm_slots = _normalize_llm_authored_slots(
+            raw_slots,
+            user=user,
+            now=now,
+            today=today_for_user(user),
+            policy=policy,
+        )
+        if llm_slots:
+            return llm_slots
+        # LLM이 준 슬롯 중 검증을 통과한 게 하나도 없으면(전부 PC 패턴 밖이거나
+        # 과거 시각이거나 등) 정책 엔진으로 안전하게 폴백한다.
+        logger.warning("AI가 반환한 슬롯이 전부 검증에 실패해 정책 엔진으로 폴백합니다.")
+
     policy_slots = build_policy_recommended_slots(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         base_time=now,
     )
-    raw_slots = ai_output.get("slots", [])
     normalized = []
 
     for index, policy_slot in enumerate(policy_slots):
@@ -895,12 +970,13 @@ def _persist_ai_plan(
     raw_response,
     normalized_slots,
     notification_enabled,
+    generator_name=POLICY_GENERATOR_NAME,
 ):
     ai_run = AIPlanRun.objects.create(
         user=user,
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
-        model_name=POLICY_GENERATOR_NAME,
+        model_name=generator_name,
         input_snapshot_json=input_snapshot,
         output_snapshot_json={"parsed": ai_output, "raw_response": raw_response},
     )
@@ -949,6 +1025,61 @@ def generate_ai_recovery_plan(
     )
     _validate_recovery_activity_catalog(context_snapshot, next_activity_plan)
     input_snapshot = build_ai_input_snapshot(user, context_snapshot, next_activity_plan)
+
+    ai_output, raw_response, generator_name, is_ai_generated = _generate_plan_output(
+        user=user,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        input_snapshot=input_snapshot,
+    )
+    normalized_slots = normalize_ai_slots(
+        ai_output,
+        user,
+        context_snapshot,
+        next_activity_plan,
+        is_ai_generated=is_ai_generated,
+    )
+    return _persist_ai_plan(
+        user=user,
+        context_snapshot=context_snapshot,
+        next_activity_plan=next_activity_plan,
+        input_snapshot=input_snapshot,
+        ai_output=ai_output,
+        raw_response=raw_response,
+        normalized_slots=normalized_slots,
+        notification_enabled=notification_enabled,
+        generator_name=generator_name,
+    )
+
+
+def _generate_plan_output(*, user, context_snapshot, next_activity_plan, input_snapshot):
+    """
+    실제 LLM 호출을 먼저 시도한다 — 성공하면 개수/시각까지 AI가 자율적으로 정한
+    결과를 쓴다. API 키 미설정/호출 실패/예기치 못한 오류가 나면 서버 정책
+    엔진으로 안전하게 폴백해서, OpenAI 장애가 통째로 회복 계획 생성 실패로
+    이어지지 않게 한다(하루 회복 루틴은 사용자에게 핵심 기능이라 가용성이
+    자율성보다 우선).
+    """
+    try:
+        input_messages = build_input_messages(input_snapshot)
+        ai_output, raw_openai_response = create_structured_response(
+            input_messages=input_messages,
+            schema=RECOVERY_PLAN_SCHEMA,
+        )
+        generator_name = f"openai:{settings.OPENAI_MODEL}"
+        raw_response = {
+            "generator": generator_name,
+            "external_api_called": True,
+            "response": raw_openai_response,
+        }
+        return ai_output, raw_response, generator_name, True
+    except OpenAIConfigurationError:
+        logger.info("OPENAI_API_KEY 미설정으로 정책 엔진으로 생성합니다.")
+    except OpenAIClientError:
+        logger.warning("OpenAI API 호출 실패로 정책 엔진으로 폴백합니다.", exc_info=True)
+    except Exception:
+        logger.exception("AI 회복 계획 생성 중 예기치 못한 오류로 정책 엔진으로 폴백합니다.")
+
     ai_output = build_policy_output(
         user,
         context_snapshot,
@@ -959,14 +1090,4 @@ def generate_ai_recovery_plan(
         "generator": POLICY_GENERATOR_NAME,
         "external_api_called": False,
     }
-    normalized_slots = normalize_ai_slots(ai_output, user, context_snapshot, next_activity_plan)
-    return _persist_ai_plan(
-        user=user,
-        context_snapshot=context_snapshot,
-        next_activity_plan=next_activity_plan,
-        input_snapshot=input_snapshot,
-        ai_output=ai_output,
-        raw_response=raw_response,
-        normalized_slots=normalized_slots,
-        notification_enabled=notification_enabled,
-    )
+    return ai_output, raw_response, POLICY_GENERATOR_NAME, False
