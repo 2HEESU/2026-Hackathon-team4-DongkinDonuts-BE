@@ -1017,6 +1017,7 @@ def generate_ai_recovery_plan(
     context_snapshot=None,
     next_activity_plan=None,
     notification_enabled=True,
+    use_ai_decision=False,
 ):
     context_snapshot, next_activity_plan = resolve_generation_inputs(
         user=user,
@@ -1031,6 +1032,7 @@ def generate_ai_recovery_plan(
         context_snapshot=context_snapshot,
         next_activity_plan=next_activity_plan,
         input_snapshot=input_snapshot,
+        use_ai_decision=use_ai_decision,
     )
     normalized_slots = normalize_ai_slots(
         ai_output,
@@ -1052,33 +1054,38 @@ def generate_ai_recovery_plan(
     )
 
 
-def _generate_plan_output(*, user, context_snapshot, next_activity_plan, input_snapshot):
+def _generate_plan_output(*, user, context_snapshot, next_activity_plan, input_snapshot, use_ai_decision):
     """
-    실제 LLM 호출을 먼저 시도한다 — 성공하면 개수/시각까지 AI가 자율적으로 정한
-    결과를 쓴다. API 키 미설정/호출 실패/예기치 못한 오류가 나면 서버 정책
-    엔진으로 안전하게 폴백해서, OpenAI 장애가 통째로 회복 계획 생성 실패로
-    이어지지 않게 한다(하루 회복 루틴은 사용자에게 핵심 기능이라 가용성이
-    자율성보다 우선).
+    use_ai_decision=True일 때만 실제 LLM 호출을 먼저 시도한다 — 성공하면 개수/
+    시각까지 AI가 자율적으로 정한 결과를 쓴다. API 키 미설정/호출 실패/예기치
+    못한 오류가 나면 서버 정책 엔진으로 안전하게 폴백해서, OpenAI 장애가 통째로
+    회복 계획 생성 실패로 이어지지 않게 한다(하루 회복 루틴은 사용자에게 핵심
+    기능이라 가용성이 자율성보다 우선).
+
+    use_ai_decision=False(기본값)면 LLM은 아예 시도하지 않고 곧장 정책 엔진으로
+    간다 — My Digital State에서 PC 사용 패턴을 입력하고 만든 흐름이 아니면
+    (예: 상태 선택 모달로 진행하는 "회복 루틴 시작하기") 원래 로직 그대로다.
     """
-    try:
-        input_messages = build_input_messages(input_snapshot)
-        ai_output, raw_openai_response = create_structured_response(
-            input_messages=input_messages,
-            schema=RECOVERY_PLAN_SCHEMA,
-        )
-        generator_name = f"openai:{settings.OPENAI_MODEL}"
-        raw_response = {
-            "generator": generator_name,
-            "external_api_called": True,
-            "response": raw_openai_response,
-        }
-        return ai_output, raw_response, generator_name, True
-    except OpenAIConfigurationError:
-        logger.info("OPENAI_API_KEY 미설정으로 정책 엔진으로 생성합니다.")
-    except OpenAIClientError:
-        logger.warning("OpenAI API 호출 실패로 정책 엔진으로 폴백합니다.", exc_info=True)
-    except Exception:
-        logger.exception("AI 회복 계획 생성 중 예기치 못한 오류로 정책 엔진으로 폴백합니다.")
+    if use_ai_decision:
+        try:
+            input_messages = build_input_messages(input_snapshot)
+            ai_output, raw_openai_response = create_structured_response(
+                input_messages=input_messages,
+                schema=RECOVERY_PLAN_SCHEMA,
+            )
+            generator_name = f"openai:{settings.OPENAI_MODEL}"
+            raw_response = {
+                "generator": generator_name,
+                "external_api_called": True,
+                "response": raw_openai_response,
+            }
+            return ai_output, raw_response, generator_name, True
+        except OpenAIConfigurationError:
+            logger.info("OPENAI_API_KEY 미설정으로 정책 엔진으로 생성합니다.")
+        except OpenAIClientError:
+            logger.warning("OpenAI API 호출 실패로 정책 엔진으로 폴백합니다.", exc_info=True)
+        except Exception:
+            logger.exception("AI 회복 계획 생성 중 예기치 못한 오류로 정책 엔진으로 폴백합니다.")
 
     ai_output = build_policy_output(
         user,

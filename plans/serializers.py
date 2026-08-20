@@ -528,6 +528,10 @@ class RecoveryPlanCreateSerializer(OwnedContextInputMixin, serializers.Serialize
 
 class AIRecoveryPlanGenerateSerializer(OwnedContextInputMixin, serializers.Serializer):
     notification_enabled = serializers.BooleanField(default=True)
+    # My Digital State에서 PC 사용 패턴을 입력하고 "생성"을 눌렀을 때만 프론트가
+    # true로 보낸다 — 그때만 실제 LLM(개수/시각 자율 판단)을 시도한다. 상태 선택
+    # 모달로 진행하는 흐름 등은 안 보내서 기본값 false로, 원래 정책 엔진만 탄다.
+    use_ai_decision = serializers.BooleanField(default=False)
 
 
 class RecoverySlotCreateSerializer(OwnedContextInputMixin, serializers.Serializer):
