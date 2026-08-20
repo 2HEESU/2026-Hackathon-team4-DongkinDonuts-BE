@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from context.models import NextActivityPlan, UserContextSnapshot
 from routines.serializers import ActivityTypeSerializer
+from sessions_app.difficulty import recommended_frontend_difficulty_for_routine
 from sessions_app.models import DifficultyFeedback, RecoveryFeeling, SessionFeedback
 
 from .models import (
@@ -148,8 +149,6 @@ def history_status_for_slot(slot, now):
         return "IN_PROGRESS"
     if _has_expired_sent_recovery_notification(slot, now):
         return "CANCELED"
-    if slot.effective_time and slot.effective_time < now:
-        return "MISSED"
 
     return "UPCOMING"
 
@@ -215,8 +214,11 @@ class RecoverySlotRoutineInstanceSerializer(serializers.Serializer):
     id = serializers.UUIDField()
     activity = ActivityTypeSerializer()
     stage_type = serializers.CharField(source="activity.stage_type")
+    frontend_session_base_id = serializers.SerializerMethodField()
     sequence_no = serializers.IntegerField()
     difficulty_level = serializers.IntegerField()
+    recommended_difficulty = serializers.SerializerMethodField()
+    recommended_difficulty_level = serializers.SerializerMethodField()
     planned_duration_sec = serializers.IntegerField()
     status = serializers.CharField()
     locked_until_previous_done = serializers.BooleanField()
@@ -225,6 +227,29 @@ class RecoverySlotRoutineInstanceSerializer(serializers.Serializer):
 
     def get_insights(self, obj):
         return AIInsightSerializer(obj.insights.all(), many=True).data
+
+    def _recommended_difficulty(self, obj):
+        if hasattr(obj, "_recommended_frontend_difficulty"):
+            return obj._recommended_frontend_difficulty
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        obj._recommended_frontend_difficulty = (
+            recommended_frontend_difficulty_for_routine(obj, user=user)
+        )
+        return obj._recommended_frontend_difficulty
+
+    def get_frontend_session_base_id(self, obj):
+        recommended = self._recommended_difficulty(obj)
+        return recommended["base_id"] if recommended else None
+
+    def get_recommended_difficulty(self, obj):
+        recommended = self._recommended_difficulty(obj)
+        return recommended["key"] if recommended else None
+
+    def get_recommended_difficulty_level(self, obj):
+        recommended = self._recommended_difficulty(obj)
+        return recommended["level"] if recommended else None
 
 
 class SlotFeedbackSerializer(serializers.ModelSerializer):
@@ -406,6 +431,10 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
         routines = []
         for routine in obj.routine_instances.all():
             reason = None
+            difficulty = recommended_frontend_difficulty_for_routine(
+                routine,
+                user=obj.recovery_plan.user,
+            )
             for insight in routine.insights.all():
                 if insight.insight_type == InsightType.ROUTINE_REASON:
                     reason = insight.body
@@ -416,7 +445,16 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
                     "sequence_no": routine.sequence_no,
                     "stage_type": routine.activity.stage_type,
                     "activity": ActivityTypeSerializer(routine.activity).data,
+                    "frontend_session_base_id": (
+                        difficulty["base_id"] if difficulty else None
+                    ),
                     "difficulty_level": routine.difficulty_level,
+                    "recommended_difficulty": (
+                        difficulty["key"] if difficulty else None
+                    ),
+                    "recommended_difficulty_level": (
+                        difficulty["level"] if difficulty else None
+                    ),
                     "planned_duration_sec": routine.planned_duration_sec,
                     "status": routine.status,
                     "recommended_at": obj.effective_time,

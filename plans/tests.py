@@ -17,8 +17,19 @@ from context.models import (
 )
 from context.utils import today_for_user
 from digital_state.models import PcUsagePattern
-from routines.models import ActivityType, RoutineInstance, StageType
-from sessions_app.models import Session, SessionStatus
+from routines.models import (
+    ActivityType,
+    RoutineInstance,
+    RoutineInstanceStatus,
+    StageType,
+)
+from sessions_app.models import (
+    DifficultyFeedback,
+    RecoveryFeeling,
+    Session,
+    SessionFeedback,
+    SessionStatus,
+)
 
 from .models import (
     AIInsight,
@@ -1085,3 +1096,89 @@ class RecoveryPlanApiTests(APITestCase):
         list_after_delete_response = self.client.get("/api/v1/plans/notification-subscriptions/")
         self.assertEqual(list_after_delete_response.status_code, status.HTTP_200_OK)
         self.assertEqual(list_after_delete_response.data["data"], [])
+
+
+class RecoverySlotRoutineDifficultyApiTests(APITestCase):
+    def setUp(self):
+        self.device_code = uuid.uuid4()
+        self.user = User.objects.create(id=self.device_code, timezone="Asia/Seoul")
+        self.client.credentials(HTTP_X_DEVICE_CODE=str(self.device_code))
+        self.plan = RecoveryPlan.objects.create(
+            user=self.user,
+            plan_date=today_for_user(self.user),
+        )
+        self.activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_EYE_RELAX",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "눈 피로 풀기",
+                "purpose": "화면 사용으로 긴장된 눈과 시선을 쉬게 합니다.",
+                "required_landmarks": ["LEFT_EYE", "RIGHT_EYE"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+
+    def _create_slot_with_routine(self, sequence_no, status=SlotStatus.RECOMMENDED):
+        slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=sequence_no,
+            recommended_at=timezone.now() + timedelta(minutes=sequence_no * 20),
+            status=status,
+        )
+        routine = RoutineInstance.objects.create(
+            recovery_slot=slot,
+            activity=self.activity,
+            sequence_no=1,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.AVAILABLE,
+            locked_until_previous_done=False,
+        )
+        return slot, routine
+
+    def test_routine_defaults_to_medium_without_previous_feedback(self):
+        slot, _ = self._create_slot_with_routine(sequence_no=1)
+
+        response = self.client.get(f"/api/v1/plans/recovery-slots/{slot.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        routine_data = response.data["data"]["routine_instances"][0]
+        self.assertEqual(routine_data["frontend_session_base_id"], "eye-blink")
+        self.assertEqual(routine_data["recommended_difficulty"], "medium")
+        self.assertEqual(routine_data["recommended_difficulty_level"], 2)
+
+    def test_routine_uses_previous_completed_session_feedback(self):
+        previous_slot, previous_routine = self._create_slot_with_routine(
+            sequence_no=1,
+            status=SlotStatus.COMPLETED,
+        )
+        started_at = timezone.now() - timedelta(days=1, minutes=3)
+        Session.objects.create(
+            user=self.user,
+            recovery_slot=previous_slot,
+            routine_instance=previous_routine,
+            activity=self.activity,
+            started_at=started_at,
+            ended_at=started_at + timedelta(minutes=2),
+            duration_sec=120,
+            accuracy=95,
+            metrics={"difficulty": "medium"},
+            status=SessionStatus.COMPLETED,
+        )
+        SessionFeedback.objects.create(
+            recovery_slot=previous_slot,
+            user=self.user,
+            recovery_feeling=RecoveryFeeling.SAME,
+            difficulty_feedback=DifficultyFeedback.TOO_EASY,
+        )
+        current_slot, _ = self._create_slot_with_routine(sequence_no=2)
+
+        response = self.client.get(f"/api/v1/plans/recovery-slots/{current_slot.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        routine_data = response.data["data"]["routine_instances"][0]
+        self.assertEqual(routine_data["recommended_difficulty"], "high")
+        self.assertEqual(routine_data["recommended_difficulty_level"], 3)
