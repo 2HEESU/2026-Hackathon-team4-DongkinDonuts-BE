@@ -137,14 +137,10 @@ SYSTEM_PROMPT = """
 - Brain Wake와 Brain Reset은 모든 상태에서 공통으로 제공되며 서버가 선택한다.
 - 개인화는 Brain Shift에만 적용한다. shift_recommendation은 반드시 shift_activity_catalog에 있는
   activity_code 중 하나를 골라야 한다.
-- generation_mode가 SEQUENTIAL_NEXT_ONLY이면 slots는 반드시 1개만 만든다.
-- generation_mode가 WEEK_PATTERN_BATCH이면 오늘 남은 시간 안에서 1~6개의 slots를 만든다.
-- time_policy.interval_minutes를 추천 간격으로 사용한다. 복수 상태는 더 짧은 간격이 우선이다.
-- recommended_at은 current_time 이후, plan_date 당일, YYYY-MM-DDTHH:MM:SS 형식으로 쓰되
-  서버가 time_policy와 PC 사용 구간에 맞춰 최종 보정한다.
+- [필수 제약 조건] 모든 recommended_at 추천 시각은 사용자가 선택한 pc_usage_patterns (PC 사용 시간대 블록) 범위 내부여야 한다. PC를 사용하지 않는 시간대에는 절대 알림을 생성하지 않는다.
+- [AI 자율 판단] PC 사용 밀집 구간과 과거 세션/상태 빈도를 고려하여 알림의 수량(slots 개수)과 가장 피로도가 누적될 것으로 예상되는 최적의 발송 시각을 자유롭게 판단하여 추천한다.
+- recommended_at은 current_time 이후, plan_date 당일, YYYY-MM-DDTHH:MM:SS 형식으로 작성한다.
 - difficulty_level은 사용자의 상태와 피드백을 반영하되 활동의 난이도 범위 안에서 정한다.
-- 사용자가 회복 세션을 수행한 뒤 다시 이후 활동을 입력할 수 있으므로, 과도하게 먼 미래의
-  결정을 한 슬롯에 몰아넣지 않는다.
 """.strip()
 
 
