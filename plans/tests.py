@@ -774,13 +774,15 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(ai_run.model_name, "server_policy")
         self.assertFalse(ai_run.output_snapshot_json["raw_response"]["external_api_called"])
 
-    def test_ai_generate_policy_fallback_places_one_notification_per_pc_usage_window(self):
+    def test_ai_generate_policy_fallback_repeats_within_each_pc_usage_window(self):
         """
         LLM이 없을 때(OPENAI_API_KEY 없음, 클래스 기본값) My Digital State
         흐름(use_ai_decision=True)의 정책 폴백은 PC 사용 패턴의 연속된 시간
-        블록(윈도우)마다 하나씩, 그 블록 중간 지점에 알림을 배치해야 한다 —
-        "여러 블록을 체크하면 그만큼 알림이 나뉘어 온다"는 기대에 맞춘 것이고,
-        상태 인터벌 반복(SNAPSHOT)으로 뭉개지면 안 된다.
+        블록(윈도우)마다 그 안에서 상태 기반 interval 간격으로 반복되는 알림을
+        배치해야 한다 — 블록 중간 지점 딱 1개로 뭉개지면 안 되고(긴 블록일수록
+        더 자주 와야 함), 상태 인터벌 반복(SNAPSHOT)으로도 뭉개지면 안 된다.
+        self.state(NECK_STIFF)는 RECOVERY_INTERVAL_MINUTES_BY_STATE에 없어서
+        기본 간격(45분)이 적용된다.
         """
         user, _ = User.objects.get_or_create(
             id=self.device_code, defaults={"timezone": "Asia/Seoul"}
@@ -825,10 +827,15 @@ class RecoveryPlanApiTests(APITestCase):
         created_slots = list(
             RecoverySlot.objects.filter(recovery_plan_id=plan_id).order_by("sequence_no")
         )
-        self.assertEqual(len(created_slots), 2)
+        self.assertEqual(len(created_slots), 4)
         self.assertEqual(
             [slot.recommended_at for slot in created_slots],
-            [fixed_now.replace(hour=7, minute=0), fixed_now.replace(hour=11, minute=0)],
+            [
+                fixed_now.replace(hour=6, minute=45),
+                fixed_now.replace(hour=7, minute=30),
+                fixed_now.replace(hour=10, minute=45),
+                fixed_now.replace(hour=11, minute=30),
+            ],
         )
         self.assertTrue(all(slot.notification_basis == SlotNotificationBasis.FREQUENCY for slot in created_slots))
 
@@ -865,7 +872,8 @@ class RecoveryPlanApiTests(APITestCase):
             created_at=fixed_now,
         )
 
-        # 1) My Digital State 흐름 — 06~08시/10~12시 블록 알림 미리 생성(07:00, 11:00)
+        # 1) My Digital State 흐름 — 06~08시/10~12시 블록마다 45분 간격 알림 미리
+        # 생성(06:45,07:30 / 10:45,11:30)
         with patch("plans.ai_planner.timezone.now", return_value=fixed_now):
             self.client.post(
                 "/api/v1/plans/recovery-plans/today/ai-generate/",
@@ -897,8 +905,12 @@ class RecoveryPlanApiTests(APITestCase):
                 notification_basis=SlotNotificationBasis.FREQUENCY,
             )
         }
-        self.assertEqual(frequency_slots[fixed_now.replace(hour=7, minute=0)], SlotStatus.CANCELED)
-        self.assertEqual(frequency_slots[fixed_now.replace(hour=11, minute=0)], SlotStatus.RECOMMENDED)
+        # 가장 가까운 06~08시 블록의 알림 2개는 전부 취소, 더 먼 10~12시 블록의
+        # 알림 2개는 그대로 남아있어야 한다.
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=6, minute=45)], SlotStatus.CANCELED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=7, minute=30)], SlotStatus.CANCELED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=10, minute=45)], SlotStatus.RECOMMENDED)
+        self.assertEqual(frequency_slots[fixed_now.replace(hour=11, minute=30)], SlotStatus.RECOMMENDED)
 
     @override_settings(OPENAI_API_KEY="test-key")
     @patch("plans.ai_planner.create_structured_response")

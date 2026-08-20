@@ -1,3 +1,4 @@
+import itertools
 from datetime import datetime, time, timedelta
 
 from django.db import transaction
@@ -384,20 +385,39 @@ def _today_pc_usage_windows(user):
     return windows
 
 
-def _today_pc_usage_break_times(user, base_time):
+def _today_pc_usage_break_times(user, base_time, interval):
     """
-    오늘 PC 사용 패턴에서 연속된 시간 블록(윈도우)마다 하나씩, 그 블록 중간
-    지점을 쉴만한 타이밍으로 잡아 알림 후보 시각을 만든다. 이미 지나간
-    윈도우(중간 지점이 base_time 이전)는 건너뛴다 — 사용자가 여러 블록을
-    체크하면 그만큼 알림이 나뉘어 오도록 하는 게 목적.
+    오늘 PC 사용 패턴의 연속된 시간 블록(윈도우)마다, 그 블록 안에서 상태 기반
+    interval 간격으로 반복되는 휴식 알림 후보 시각을 만든다 — 긴 블록일수록
+    자연히 알림이 더 자주 오고(예: EYE_TIRED 20분 간격이면 4시간 블록엔 12개),
+    interval보다 짧은 블록은 중간 지점 하나로 최소 1개는 보장한다. 이미 지난
+    시각은 건너뛴다.
+
+    블록별로 만든 후보를 그대로 이어붙이지 않고 라운드로빈으로 섞는다 — 안 그러면
+    긴 블록 하나가(예: 4시간짜리가 12개) 상한선(max_slots)을 혼자 다 써버려서
+    뒤에 있는 다른 블록엔 알림이 하나도 안 배정되는 문제가 생긴다. 라운드로빈으로
+    섞어두면 상한선에 걸려 뒤가 잘리더라도 모든 블록이 최소 한 개씩은 먼저
+    대표된 뒤에야 잘린다.
     """
-    times = []
+    per_window_times = []
     for start, end in _today_pc_usage_windows(user):
-        midpoint = _minute_floor(start + (end - start) / 2)
-        if midpoint <= base_time:
-            continue
-        times.append(midpoint)
-    return times
+        window_times = []
+        candidate = _minute_floor(start + interval)
+        while candidate <= end:
+            window_times.append(candidate)
+            candidate += interval
+
+        if not window_times:
+            window_times = [_minute_floor(start + (end - start) / 2)]
+
+        window_times = [t for t in window_times if t > base_time]
+        if window_times:
+            per_window_times.append(window_times)
+
+    interleaved = []
+    for group in itertools.zip_longest(*per_window_times):
+        interleaved.extend(t for t in group if t is not None)
+    return interleaved
 
 
 def _activity_window_end(next_activity_plan, base_time):
@@ -614,10 +634,12 @@ def build_policy_recommended_slots(
     하는 흐름에서 쓴다.
 
     prioritize_pc_usage_windows=True(My Digital State에서 PC 사용 패턴을 입력하고
-    만든 흐름에서만 킴)면, 오늘 PC 사용 패턴이 있는 한 상태 인터벌 반복 대신
-    "PC 사용 블록(연속된 시간대)마다 하나씩, 그 블록 중간 지점에 휴식 알림"을
-    우선 배치한다 — 여러 블록을 체크하면 그만큼 알림이 나뉘어 오게 하기 위함.
-    이 플래그가 False인 다른 호출부(예: 이후 활동 다시 설정)는 기존 동작 그대로다.
+    만든 흐름에서만 킴)면, 오늘 PC 사용 패턴이 있는 한 하루 전체 인터벌 반복
+    대신 "PC 사용 블록(연속된 시간대)마다 그 안에서 상태 기반 interval 간격으로
+    반복"되는 휴식 알림을 우선 배치한다 — 블록이 길수록 자연히 더 자주 오고
+    (긴 블록 하나에 알림 1개뿐이면 너무 뜸해서), interval보다 짧은 블록은
+    중간 지점 하나로 최소 1개는 보장한다. 이 플래그가 False인 다른 호출부
+    (예: 이후 활동 다시 설정)는 기존 동작 그대로다.
     """
 
     base_time = _minute_floor(base_time or timezone.now())
@@ -627,7 +649,7 @@ def build_policy_recommended_slots(
     slots_by_time = {}
 
     pc_break_times = (
-        _today_pc_usage_break_times(user, base_time)
+        _today_pc_usage_break_times(user, base_time, interval)
         if prioritize_pc_usage_windows and include_frequency_slots
         else []
     )
