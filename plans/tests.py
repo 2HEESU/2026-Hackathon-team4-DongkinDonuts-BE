@@ -986,6 +986,43 @@ class RecoveryPlanApiTests(APITestCase):
         self.assertEqual(created_slots[0].recommended_at, fixed_now.replace(hour=11, minute=15))
         self.assertEqual(created_slots[0].notification_basis, SlotNotificationBasis.FREQUENCY)
 
+        # 이 FREQUENCY 슬롯이 아직 안 지난 상태에서, 다른 생성(예: 상태 선택
+        # 모달)이 한 번 더 일어나면 create_or_replace_today_plan이 이 슬롯을
+        # 새 plan에 "보존"해서 다시 만든다. 그 보존된 새 슬롯도 실제 회복
+        # 세션을 실행할 수 있어야 한다 — routine_instances가 비어있으면
+        # "지금 시작할 수 있는 루틴이 없어요" 화면으로 막힌다.
+        second_snapshot_response = self.client.post(
+            "/api/v1/context/context-snapshots/",
+            {"state_options": [self.state.code]},
+            format="json",
+        )
+        second_activity_plan_response = self.client.post(
+            "/api/v1/context/next-activity-plans/",
+            {
+                "context_snapshot": second_snapshot_response.data["data"]["id"],
+                "activity_tags": [self.activity_tag.code],
+                "expected_activity_minutes": 30,
+            },
+            format="json",
+        )
+        with patch("plans.ai_planner.timezone.now", return_value=fixed_now + timedelta(minutes=5)):
+            second_response = self.client.post(
+                "/api/v1/plans/recovery-plans/today/ai-generate/",
+                {
+                    "context_snapshot": second_snapshot_response.data["data"]["id"],
+                    "next_activity_plan": second_activity_plan_response.data["data"]["id"],
+                },
+                format="json",
+            )
+
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        preserved_slot = RecoverySlot.objects.get(
+            recovery_plan_id=second_response.data["data"]["id"],
+            notification_basis=SlotNotificationBasis.FREQUENCY,
+        )
+        self.assertTrue(preserved_slot.routine_instances.exists())
+        self.assertTrue(preserved_slot.insights.exists())
+
     def test_modal_generate_keeps_existing_frequency_notifications(self):
         """
         My Digital State로 06~08시/10~12시 두 블록에 알림을 미리 만들어둔 뒤,

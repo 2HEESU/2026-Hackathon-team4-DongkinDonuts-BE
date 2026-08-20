@@ -1150,8 +1150,23 @@ def _persist_ai_plan(
     )
     _create_plan_insights(plan, ai_output)
 
+    # plan.slots는 방금 만든 slot_inputs 개수(normalized_slots)보다 많을 수
+    # 있다 — create_or_replace_today_plan이 예전 plan에서 아직 안 지난
+    # FREQUENCY 슬롯을 "보존"해서 새 plan에 추가로 끼워 넣기 때문
+    # (preserved_frequency_slot_inputs). zip(slots, normalized_slots)로
+    # 돌리면 그 보존된 슬롯들은 normalized_slots에 대응하는 항목이 없어서
+    # 통째로 건너뛰어졌고, 그 결과 interval_minutes/인사이트/routine_instances가
+    # 하나도 안 만들어져서 "지금 시작할 수 있는 루틴이 없어요"로 이어졌다.
+    # normalized_slots에 대응이 없는 슬롯도 기본값으로라도 반드시 처리한다.
     slots = list(plan.slots.order_by("sequence_no"))
-    for slot, ai_slot in zip(slots, normalized_slots):
+    fallback_ai_slot = {
+        "interval_minutes": None,
+        "reason": "이전 이력을 바탕으로 예약된 알림입니다.",
+        "data_sources": ["previous_sessions"],
+        "shift_recommendations": [{}],
+    }
+    for index, slot in enumerate(slots):
+        ai_slot = normalized_slots[index] if index < len(normalized_slots) else fallback_ai_slot
         slot.interval_minutes = ai_slot["interval_minutes"]
         slot.save(update_fields=["interval_minutes", "updated_at"])
         _create_slot_insight(slot, ai_slot["reason"], ai_slot.get("data_sources"))
