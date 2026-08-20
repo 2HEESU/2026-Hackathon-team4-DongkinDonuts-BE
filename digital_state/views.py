@@ -10,7 +10,7 @@ from common.mixins import EnvelopeMixin
 
 from .models import DayOfWeek, PcUsagePattern
 from .serializers import PcUsagePatternItemSerializer, PcUsagePatternSerializer
-from .services import analyze_pc_usage_patterns, get_pattern_status
+from .services import analyze_pc_usage_patterns, analyze_recent_session_patterns, get_pattern_status
 
 # day_of_week가 문자열(CharField)이라 그냥 정렬하면 월~일 순서가 안 나옴 —
 # 화면에 보여줄 순서를 여기서 직접 정의해서 정렬 키로 쓴다.
@@ -95,6 +95,22 @@ class PcUsagePatternAnalysisView(EnvelopeMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         return Response(analyze_pc_usage_patterns(request.user))
+
+
+class RecentSessionActivityAnalysisView(EnvelopeMixin, APIView):
+    """
+    GET /digital-state/patterns/analysis/recent-sessions/ — 지난 7일간 실제로
+    완료한 회복 세션 기록 기반 분석. PcUsagePatternAnalysisView(자기보고 체크값
+    기반)와 응답 형태는 동일하고, 데이터 출처만 실제 행동 기록으로 바뀐다 —
+    사용자가 "이 시간에 쓸 것 같다"고 미리 체크해둔 예정보다, 실제로 회복
+    세션을 시작한 시점이 더 신뢰할 수 있는 신호라서 이쪽을 우선한다.
+    """
+
+    permission_classes = [IsAuthenticated]
+    http_method_names = ["get", "options"]
+
+    def get(self, request, *args, **kwargs):
+        return Response(analyze_recent_session_patterns(request.user, days=7))
 
 
 class PcUsagePatternStatusView(EnvelopeMixin, APIView):
