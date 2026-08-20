@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from context.models import NextActivityPlan, UserContextSnapshot
+from routines.models import StageType
 from routines.serializers import ActivityTypeSerializer
 from sessions_app.difficulty import recommended_frontend_difficulty_for_routine
 from sessions_app.models import DifficultyFeedback, RecoveryFeeling, SessionFeedback
@@ -429,7 +430,9 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
 
     def get_recommended_routines(self, obj):
         routines = []
-        for routine in obj.routine_instances.all():
+        # Your History의 추천 루틴은 공통 단계(Brain Wake, Brain Reset)를 제외한 개인 맞춤 단계(BRAIN_SHIFT 1~2개)만 리턴
+        shift_routines = obj.routine_instances.filter(activity__stage_type=StageType.BRAIN_SHIFT)
+        for routine in shift_routines:
             reason = None
             difficulty = recommended_frontend_difficulty_for_routine(
                 routine,
@@ -463,6 +466,7 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
                 }
             )
         return routines
+
 
     def get_remark(self, obj):
         """
