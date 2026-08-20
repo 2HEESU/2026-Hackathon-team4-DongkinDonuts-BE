@@ -50,6 +50,14 @@ def frontend_base_id_for_activity(activity_code):
     return FRONTEND_ACTIVITY_BASE_IDS.get(activity_code)
 
 
+def activity_codes_for_frontend_base_id(base_id):
+    return [
+        activity_code
+        for activity_code, candidate_base_id in FRONTEND_ACTIVITY_BASE_IDS.items()
+        if candidate_base_id == base_id
+    ]
+
+
 def _clamp_frontend_level(level):
     return min(
         MAX_FRONTEND_DIFFICULTY_LEVEL,
@@ -110,10 +118,11 @@ def recommended_frontend_difficulty_for_routine(routine_instance, user=None):
         return None
 
     user = user or routine_instance.recovery_slot.recovery_plan.user
+    activity_codes = activity_codes_for_frontend_base_id(base_id)
     latest_session = (
         Session.objects.filter(
             user=user,
-            activity_id=routine_instance.activity_id,
+            activity_id__in=activity_codes,
             status=SessionStatus.COMPLETED,
             recovery_slot__feedback__difficulty_feedback__isnull=False,
             recovery_slot__feedback__skipped=False,

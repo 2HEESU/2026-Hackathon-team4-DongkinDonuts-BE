@@ -1939,3 +1939,140 @@ class RecoverySlotRoutineDifficultyApiTests(APITestCase):
         routine_data = response.data["data"]["routine_instances"][0]
         self.assertEqual(routine_data["recommended_difficulty"], "high")
         self.assertEqual(routine_data["recommended_difficulty_level"], 3)
+
+    def test_routine_uses_previous_feedback_for_same_frontend_session_kind(self):
+        previous_eye_activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_EYE_BLINK",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "눈 깜빡임",
+                "purpose": "눈 피로를 낮춥니다.",
+                "required_landmarks": ["LEFT_EYE", "RIGHT_EYE"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+        previous_focus_activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_FOCUS_SWITCH",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "집중 전환",
+                "purpose": "주의를 다시 모읍니다.",
+                "required_landmarks": ["LEFT_HAND", "RIGHT_HAND"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+        current_focus_activity, _ = ActivityType.objects.update_or_create(
+            code="SHIFT_FOCUS_PINCH",
+            defaults={
+                "stage_type": StageType.BRAIN_SHIFT,
+                "name": "집중 핀치",
+                "purpose": "주의를 다시 모읍니다.",
+                "required_landmarks": ["LEFT_HAND", "RIGHT_HAND"],
+                "min_difficulty": 1,
+                "max_difficulty": 4,
+                "default_duration_sec": 90,
+                "is_active": True,
+            },
+        )
+
+        previous_slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=1,
+            recommended_at=timezone.now() - timedelta(days=1),
+            status=SlotStatus.COMPLETED,
+        )
+        previous_eye_routine = RoutineInstance.objects.create(
+            recovery_slot=previous_slot,
+            activity=previous_eye_activity,
+            sequence_no=1,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.COMPLETED,
+            locked_until_previous_done=False,
+            completed_at=timezone.now() - timedelta(days=1, minutes=10),
+        )
+        previous_focus_routine = RoutineInstance.objects.create(
+            recovery_slot=previous_slot,
+            activity=previous_focus_activity,
+            sequence_no=2,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.COMPLETED,
+            locked_until_previous_done=False,
+            completed_at=timezone.now() - timedelta(days=1, minutes=8),
+        )
+        for index, routine in enumerate([previous_eye_routine, previous_focus_routine]):
+            started_at = timezone.now() - timedelta(days=1, minutes=12 - index)
+            Session.objects.create(
+                user=self.user,
+                recovery_slot=previous_slot,
+                routine_instance=routine,
+                activity=routine.activity,
+                started_at=started_at,
+                ended_at=started_at + timedelta(minutes=2),
+                duration_sec=120,
+                accuracy=95,
+                metrics={"difficulty": "medium"},
+                status=SessionStatus.COMPLETED,
+            )
+        SessionFeedback.objects.create(
+            recovery_slot=previous_slot,
+            user=self.user,
+            recovery_feeling=RecoveryFeeling.SAME,
+            difficulty_feedback=DifficultyFeedback.A_BIT_HARD,
+        )
+
+        current_slot = RecoverySlot.objects.create(
+            recovery_plan=self.plan,
+            sequence_no=2,
+            recommended_at=timezone.now() + timedelta(minutes=20),
+            status=SlotStatus.RECOMMENDED,
+        )
+        RoutineInstance.objects.create(
+            recovery_slot=current_slot,
+            activity=self.activity,
+            sequence_no=1,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.AVAILABLE,
+            locked_until_previous_done=False,
+        )
+        RoutineInstance.objects.create(
+            recovery_slot=current_slot,
+            activity=current_focus_activity,
+            sequence_no=2,
+            difficulty_level=2,
+            planned_duration_sec=90,
+            status=RoutineInstanceStatus.LOCKED,
+            locked_until_previous_done=True,
+        )
+
+        response = self.client.get(f"/api/v1/plans/recovery-slots/{current_slot.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        routines_by_code = {
+            routine["activity"]["code"]: routine
+            for routine in response.data["data"]["routine_instances"]
+        }
+        self.assertEqual(
+            routines_by_code["SHIFT_EYE_RELAX"]["recommended_difficulty"],
+            "low",
+        )
+        self.assertEqual(
+            routines_by_code["SHIFT_EYE_RELAX"]["recommended_difficulty_level"],
+            1,
+        )
+        self.assertEqual(
+            routines_by_code["SHIFT_FOCUS_PINCH"]["recommended_difficulty"],
+            "low",
+        )
+        self.assertEqual(
+            routines_by_code["SHIFT_FOCUS_PINCH"]["recommended_difficulty_level"],
+            1,
+        )
