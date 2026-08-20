@@ -466,29 +466,38 @@ class RecoverySlotHistorySerializer(RecoverySlotSerializer):
 
     def get_remark(self, obj):
         """
-        Your History 비고(remark) 문구 결정 로직:
+        Your History 비고(remark) 최종 출력 규칙:
         - 취소 (CANCELED) -> "진행 예정 취소"
-        - 진행중 (IN_PROGRESS) / 완료 (COMPLETED) -> "" (비워두기)
+        - 진행중 (IN_PROGRESS) -> "" (비워두기)
+        - 완료 (COMPLETED) -> 사용자가 제출한 회복 체감 (훨씬 나아졌어요 / 조금 나아졌어요 / 비슷해요), 피드백 없거나 건너뛰기 시 ""
         - 진행 예정 (UPCOMING):
-          * 트랙 1 (PC 사용 패턴 분석 기반 고정 알림) -> "brainfit의 추천 시간"
-          * 트랙 2 (사용자가 세션 후 입력한 타이머 수동 예약) -> "타이머 예약 시간"
+          * 트랙 1 (PC 패턴 분석 기반 고정 알림) -> "brainfit의 추천 시간"
+          * 트랙 2 (사용자 세션 후 타이머 수동 예약) -> "타이머 예약 시간"
         """
-
         status = self.get_history_status(obj)
 
         if status == "CANCELED":
             return "진행 예정 취소"
 
-        if status in ["COMPLETED", "IN_PROGRESS"]:
+        if status == "IN_PROGRESS":
+            return ""
+
+        if status == "COMPLETED":
+            feedback = getattr(obj, "feedback", None)
+            if feedback and not feedback.skipped and feedback.recovery_feeling:
+                feeling_map = {
+                    "MUCH_BETTER": "훨씬 나아졌어요",
+                    "SLIGHTLY_BETTER": "조금 나아졌어요",
+                    "SAME": "비슷해요",
+                }
+                return feeling_map.get(feedback.recovery_feeling, "")
             return ""
 
         if status == "UPCOMING":
-            # 트랙 2: 사용자가 직접 시간을 변경(user_changed_at)했거나 수동 지정(scheduled_at)한 타이머
             if obj.user_changed_at is not None or (
                 obj.scheduled_at is not None and obj.scheduled_at != obj.recommended_at
             ):
                 return "타이머 예약 시간"
-
             # 트랙 1: PC 패턴 분석으로 생성된 기본 추천 시각 (recommended_at)
             return "brainfit의 추천 시간"
 
