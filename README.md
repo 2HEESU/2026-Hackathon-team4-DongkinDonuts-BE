@@ -1,16 +1,83 @@
-동킨 도너츠의 Brainfit 백엔드 레포지토리입니다!
+<div align="center">
 
-# 팀원 소개
+# 🧠 Brainfit — Backend
+
+**동킨 도너츠**의 Brainfit 백엔드 레포지토리입니다!
+
+멋쟁이사자처럼 동국대학교 중앙해커톤 4팀
+
+<img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white"/>
+<img src="https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=white"/>
+<img src="https://img.shields.io/badge/Django%20REST%20Framework-A30000?style=for-the-badge&logo=django&logoColor=white"/>
+<img src="https://img.shields.io/badge/SQLite-07405E?style=for-the-badge&logo=sqlite&logoColor=white"/>
+<img src="https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white"/>
+<img src="https://img.shields.io/badge/Web%20Push-FF6F00?style=for-the-badge&logo=googlechrome&logoColor=white"/>
+<br/>
+<img src="https://img.shields.io/badge/Gunicorn-499848?style=for-the-badge&logo=gunicorn&logoColor=white"/>
+<img src="https://img.shields.io/badge/Nginx-009639?style=for-the-badge&logo=nginx&logoColor=white"/>
+<img src="https://img.shields.io/badge/Gabia%20Cloud-FF6600?style=for-the-badge"/>
+<img src="https://img.shields.io/badge/GitHub%20Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white"/>
+
+</div>
+
+# 👥 팀원 소개
+
 <table>
   <tbody>
     <tr>
-      <td align="center"><a href="https://github.com/hp4323000"><img src="" width="100px;" alt=""/><br /><sub><b>기획/디자인 : 정서현</b></sub></a><br /></td>
-      <td align="center"><a href="https://github.com/rhtjdco"><img src="" width="100px;" alt=""/><br /><sub><b>FE : 고성채</b></sub></a><br /></td>
-      <td align="center"><a href="https://github.com/Yunseo2727"><img src="" width="100px;" alt=""/><br /><sub><b>FE : 노윤서</b></sub></a><br /></td>
-      <td align="center"><a href="https://github.com/2HEESU"><img src="" width="100px;" alt=""/><br /><sub><b>BE : 이희수</b></sub></a><br /></td>
-      <td align="center"><a href="https://github.com/hw4nx02"><img src="" width="100px;" alt=""/><br /><sub><b>BE : 이창환</b></sub></a><br /></td>
-    <td align="center"><a href="https://github.com/junhnno"><img src="" width="100px;" alt=""/><br /><sub><b>BE : 황준호</b></sub></a><br /></td>
-     <tr/>
+      <td align="center" width="260">
+        <img src="https://github.com/hp4323000.png" width="100" height="100" alt="정서현"/><br/>
+        <sub><b>📌 정서현 (PM)</b></sub><br/>
+        Preliminary · Design<br/>
+        📧 hp4323000@naver.com<br/>
+        🔗 <a href="https://github.com/hp4323000">GitHub</a><br/>
+        <i>"행복하자!!"</i>
+      </td>
+      <td align="center" width="260">
+        <img src="https://github.com/rhtjdco.png" width="100" height="100" alt="고성채"/><br/>
+        <sub><b>📌 고성채 (Front-end)</b></sub><br/>
+        Front-end<br/>
+        📧 gsc2926@naver.com<br/>
+        🔗 <a href="https://github.com/rhtjdco">GitHub</a><br/>
+        <i>"제가 키우는 아이들"</i>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" width="260">
+        <img src="https://github.com/Yunseo2727.png" width="100" height="100" alt="노윤서"/><br/>
+        <sub><b>📌 노윤서 (Front-end)</b></sub><br/>
+        Front-end<br/>
+        📧 yunseo272727@naver.com<br/>
+        🔗 <a href="https://github.com/Yunseo2727">GitHub</a><br/>
+        <i>"토닥토닥토닥 화이팅 토닥토닥"</i>
+      </td>
+      <td align="center" width="260">
+        <img src="https://github.com/hw4nx02.png" width="100" height="100" alt="이창환"/><br/>
+        <sub><b>📌 이창환 (Back-end)</b></sub><br/>
+        Back-end<br/>
+        📧 2002ckdgnks99@gmail.com<br/>
+        🔗 <a href="https://github.com/hw4nx02">GitHub</a><br/>
+        <i>"잘 부탁드립니다~~~~"</i>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" width="260">
+        <img src="https://github.com/2HEESU.png" width="100" height="100" alt="이희수"/><br/>
+        <sub><b>📌 이희수 (Back-end)</b></sub><br/>
+        Back-end<br/>
+        📧 sunf05121@gmail.com<br/>
+        🔗 <a href="https://github.com/2HEESU">GitHub</a><br/>
+        <i>"힘을 내어봅시다"</i>
+      </td>
+      <td align="center" width="260">
+        <img src="https://github.com/junhnno.png" width="100" height="100" alt="황준호"/><br/>
+        <sub><b>📌 황준호 (Back-end)</b></sub><br/>
+        Back-end<br/>
+        📧 withardor03@gmail.com<br/>
+        🔗 <a href="https://github.com/junhnno">GitHub</a><br/>
+        <i>"너굴쓰"</i>
+      </td>
+    </tr>
   </tbody>
 </table>
 
