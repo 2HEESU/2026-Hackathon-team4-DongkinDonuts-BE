@@ -1076,8 +1076,6 @@ def _create_routine_instances(slot, context_snapshot, next_activity_plan, shift_
     for index, spec in enumerate(shift_specs):
         spec["sequence_no"] = index + 2
 
-
-
     routine_specs = [
         _common_routine_spec(
             activity_code=WAKE_ACTIVITY_CODE,
